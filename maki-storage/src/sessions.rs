@@ -99,6 +99,14 @@ pub struct SessionMeta {
     pub workflow: bool,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub usage_by_model: HashMap<String, StoredTokenUsage>,
+    #[serde(default, skip_serializing_if = "is_default_status")]
+    pub status: SessionStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+}
+
+fn is_default_status(status: &SessionStatus) -> bool {
+    matches!(status, SessionStatus::Idle)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +132,8 @@ pub struct SessionSummary {
     pub id: String,
     pub title: String,
     pub updated_at: u64,
+    pub status: SessionStatus,
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,6 +141,24 @@ pub struct SessionSummary {
 pub enum StoredEffect {
     Allow,
     Deny,
+}
+
+/// Lifecycle status of a session, used by the `maki agents` dashboard to group
+/// sessions into Needs input / Working / Completed sections.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    /// Exists, not running, not waiting on the user.
+    #[default]
+    Idle,
+    /// Agent loop is actively running.
+    Working,
+    /// Paused waiting on the user (permission prompt or question).
+    NeedsInput,
+    /// Last run finished normally.
+    Completed,
+    /// Last run ended in an error.
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -670,6 +698,8 @@ enum ScanRecord {
     Meta {
         title: String,
         updated_at: u64,
+        #[serde(flatten)]
+        meta: SessionMeta,
     },
     #[serde(other)]
     Other,
@@ -710,17 +740,19 @@ fn scan_jsonl_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
         return None;
     }
 
-    let (title, updated_at) =
-        read_last_meta(&mut file).unwrap_or_else(|| (DEFAULT_TITLE.to_string(), 0));
+    let (title, updated_at, status, summary) = read_last_meta(&mut file)
+        .unwrap_or_else(|| (DEFAULT_TITLE.to_string(), 0, SessionStatus::default(), None));
 
     Some(SessionSummary {
         id: header.id,
         title,
         updated_at,
+        status,
+        summary,
     })
 }
 
-fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
+fn read_last_meta(file: &mut File) -> Option<(String, u64, SessionStatus, Option<String>)> {
     let len = file.seek(SeekFrom::End(0)).ok()?;
     let mut tail = TAIL_BUF.min(len);
     loop {
@@ -731,8 +763,13 @@ fn read_last_meta(file: &mut File) -> Option<(String, u64)> {
         let content = buf.strip_suffix(b"\n").unwrap_or(&buf);
         if let Some(nl) = content.iter().rposition(|&b| b == b'\n') {
             let last_line = &content[nl + 1..];
-            if let Ok(ScanRecord::Meta { title, updated_at }) = serde_json::from_slice(last_line) {
-                return Some((title, updated_at));
+            if let Ok(ScanRecord::Meta {
+                title,
+                updated_at,
+                meta,
+            }) = serde_json::from_slice(last_line)
+            {
+                return Some((title, updated_at, meta.status, meta.summary));
             }
             return None;
         }
@@ -754,6 +791,8 @@ fn scan_legacy_header(cwd: &str, path: &Path) -> Option<SessionSummary> {
         id: h.id,
         title: h.title,
         updated_at: h.updated_at,
+        status: SessionStatus::default(),
+        summary: None,
     })
 }
 
@@ -1270,6 +1309,42 @@ mod tests {
 
         let list = TestSession::list_in("/project", dir).unwrap();
         assert_eq!(list.len(), 2);
+    }
+
+    #[test_case(SessionStatus::Idle ; "idle")]
+    #[test_case(SessionStatus::Working ; "working")]
+    #[test_case(SessionStatus::NeedsInput ; "needs_input")]
+    #[test_case(SessionStatus::Completed ; "completed")]
+    #[test_case(SessionStatus::Error ; "error")]
+    fn session_status_serde_round_trip(variant: SessionStatus) {
+        let json = serde_json::to_string(&variant).unwrap();
+        let parsed: SessionStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, variant);
+    }
+
+    #[test]
+    fn scan_surfaces_status_and_defaults_idle_for_legacy() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let mut with_status: TestSession = Session::new("m", "/project");
+        with_status.meta.status = SessionStatus::NeedsInput;
+        with_status.meta.summary = Some("waiting on approval".into());
+        with_status.save_to(dir).unwrap();
+
+        let mut legacy: TestSession = Session::new("m", "/project");
+        legacy.title = "legacy".into();
+        let json_path = dir.join(format!("{}.json", legacy.id));
+        fs::write(&json_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        let by_id = |id: &str| list.iter().find(|s| s.id == id).unwrap();
+
+        let scanned = by_id(&with_status.id);
+        assert_eq!(scanned.status, SessionStatus::NeedsInput);
+        assert_eq!(scanned.summary.as_deref(), Some("waiting on approval"));
+
+        assert_eq!(by_id(&legacy.id).status, SessionStatus::Idle);
     }
 
     #[test]

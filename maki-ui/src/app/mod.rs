@@ -182,6 +182,9 @@ pub struct App {
     pub(crate) restore_event_tx: Option<maki_agent::EventSender>,
     pub(super) restoring: Arc<AtomicBool>,
     subagent_answers: HashMap<String, flume::Sender<String>>,
+    /// When true, the UI launched via `maki agents` and should present the
+    /// multi-session dashboard as its landing screen.
+    pub(crate) dashboard: bool,
 }
 
 impl App {
@@ -261,6 +264,7 @@ impl App {
             restore_event_tx: None,
             restoring: Arc::new(AtomicBool::new(false)),
             subagent_answers: HashMap::new(),
+            dashboard: false,
         };
         app.model_picker
             .set_recents(maki_storage::model::read_recents(&app.storage));

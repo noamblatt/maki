@@ -50,6 +50,8 @@ pub struct EventLoopParams {
     pub hint_reader: HintReader,
     pub ui_action_rx: Option<flume::Receiver<UiAction>>,
     pub lua_event_handle: Option<EventHandle>,
+    /// Open directly on the multi-session agents dashboard (`maki agents`).
+    pub dashboard: bool,
 }
 
 pub(crate) struct EventLoop<'t> {
@@ -173,6 +175,7 @@ impl<'t> EventLoop<'t> {
             hint_reader,
             ui_action_rx,
             lua_event_handle,
+            dashboard,
         } = params;
 
         std::thread::spawn(crate::highlight::warmup);
@@ -228,6 +231,7 @@ impl<'t> EventLoop<'t> {
         );
         app.exit_on_done = exit_on_done;
         app.lua_event_handle = lua_event_handle;
+        app.dashboard = dashboard;
 
         if needs_login {
             app.login_picker.open(app.storage.clone());

@@ -45,6 +45,14 @@ pub fn dispatch(cli: Cli) -> Result<()> {
         Some(Command::Acp { model, yolo }) => {
             acp::run(model, yolo)?;
         }
+        Some(Command::Agents { model }) => {
+            let mut cli = cli;
+            if model.is_some() {
+                cli.model = model;
+            }
+            cli.command = None;
+            tui::run_dashboard(cli)?;
+        }
         Some(Command::Migrate { action }) => match action {
             MigrateAction::Xdg => migrate::xdg()?,
         },
