@@ -52,13 +52,11 @@ pub(crate) fn register(lua: &Lua, maki: &Table) -> LuaResult<()> {
     Ok(())
 }
 
-fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Model, mlua::Error> {
+fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Model, String> {
     let Some(tier_str) = tier else {
         return Ok(Model::clone(&ctx.model));
     };
-    let requested: ModelTier = tier_str
-        .parse()
-        .map_err(|e: ModelError| mlua::Error::runtime(e))?;
+    let requested: ModelTier = tier_str.parse().map_err(|e: ModelError| e.to_string())?;
     let effective = requested.min(ctx.model.tier);
     if effective == ctx.model.tier {
         return Ok(Model::clone(&ctx.model));
@@ -80,7 +78,7 @@ fn resolve_model_from_ctx(ctx: &AgentContext, tier: Option<&str>) -> Result<Mode
                 effective,
                 ctx.model.dynamic_slug.as_deref(),
             )
-            .map_err(mlua::Error::runtime)
+            .map_err(|e| e.to_string())
         })
 }
 
@@ -93,10 +91,29 @@ fn model_to_lua_table(lua: &Lua, model: &Model) -> LuaResult<Table> {
     Ok(tbl)
 }
 
+/// `maki.agent.*` convention: wrong argument types throw; every value or
+/// runtime failure (including a ctx without dispatch capability) returns
+/// `(nil, err)`.
+fn dispatch_ctx<'a>(ctx: &'a LuaCtx, method: &str) -> Result<&'a AgentContext, String> {
+    ctx.agent
+        .as_ref()
+        .ok_or_else(|| ctx.cap_err(format!("maki.agent.{method}").as_str()))
+}
+
+type LuaPair = (LuaValue, Option<String>);
+
+fn err_pair(err: impl Into<String>) -> LuaPair {
+    (LuaValue::Nil, Some(err.into()))
+}
+
 async fn resolve_model(
     lua: Lua,
     (ctx, opts): (mlua::UserDataRef<LuaCtx>, Option<Table>),
-) -> LuaResult<Table> {
+) -> LuaResult<LuaPair> {
+    let agent = match dispatch_ctx(&ctx, "resolve_model") {
+        Ok(a) => a,
+        Err(e) => return Ok(err_pair(e)),
+    };
     let tier_str = opts
         .as_ref()
         .and_then(|t| t.get::<Option<String>>("tier").ok().flatten());
@@ -104,25 +121,30 @@ async fn resolve_model(
         .as_ref()
         .and_then(|t| t.get::<Option<String>>("spec").ok().flatten());
 
-    let model = if let Some(ref spec) = spec_str {
-        Model::from_spec(spec).map_err(mlua::Error::runtime)?
-    } else {
-        resolve_model_from_ctx(&ctx.agent, tier_str.as_deref())?
+    let model = match spec_str {
+        Some(ref spec) => Model::from_spec(spec).map_err(|e| e.to_string()),
+        None => resolve_model_from_ctx(agent, tier_str.as_deref()),
     };
-
-    model_to_lua_table(&lua, &model)
+    match model {
+        Ok(m) => Ok((LuaValue::Table(model_to_lua_table(&lua, &m)?), None)),
+        Err(e) => Ok(err_pair(e)),
+    }
 }
 
 async fn system_prompt(
-    _lua: Lua,
+    lua: Lua,
     (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table),
-) -> LuaResult<String> {
+) -> LuaResult<LuaPair> {
+    let agent = match dispatch_ctx(&ctx, "system_prompt") {
+        Ok(a) => a,
+        Err(e) => return Ok(err_pair(e)),
+    };
     let prompt_id_str: String = opts.get("prompt_id")?;
     let prompt_id = match prompt_id_str.as_str() {
         "research" => maki_agent::prompt::PromptId::Research,
         "general" => maki_agent::prompt::PromptId::General,
         "system" => maki_agent::prompt::PromptId::System,
-        other => return Err(mlua::Error::runtime(format!("unknown prompt_id: {other}"))),
+        other => return Ok(err_pair(format!("unknown prompt_id: {other}"))),
     };
 
     let vars = maki_agent::template::env_vars();
@@ -137,14 +159,20 @@ async fn system_prompt(
         _ => return Err(mlua::Error::runtime("instructions must be bool or string")),
     };
 
-    let assembled = maki_agent::prompt::assemble(prompt_id, &ctx.agent.prompt_slots, &instructions);
-    Ok(vars.apply(&assembled).into_owned())
+    let assembled = maki_agent::prompt::assemble(prompt_id, &agent.prompt_slots, &instructions);
+    let prompt = lua.create_string(vars.apply(&assembled).as_ref())?;
+    Ok((LuaValue::String(prompt), None))
 }
 
-async fn tools(lua: Lua, (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table)) -> LuaResult<LuaValue> {
+async fn tools(lua: Lua, (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table)) -> LuaResult<LuaPair> {
+    let agent = match dispatch_ctx(&ctx, "tools") {
+        Ok(a) => a,
+        Err(e) => return Ok(err_pair(e)),
+    };
     let audience_str: String = opts.get("audience")?;
-    let audience = ToolAudience::parse_name(&audience_str)
-        .ok_or_else(|| mlua::Error::runtime(format!("unknown audience: {audience_str}")))?;
+    let Some(audience) = ToolAudience::parse_name(&audience_str) else {
+        return Ok(err_pair(format!("unknown audience: {audience_str}")));
+    };
 
     let only: Option<Vec<String>> = opts.get("only")?;
     let except: Option<Vec<String>> = opts.get("except")?;
@@ -155,15 +183,14 @@ async fn tools(lua: Lua, (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table)) -> Lua
     let parsed = spec_str
         .as_deref()
         .and_then(|spec| Model::from_spec(spec).ok());
-    let model = parsed.as_ref().unwrap_or(&ctx.agent.model);
+    let model = parsed.as_ref().unwrap_or(&agent.model);
 
     let base = match (only, except) {
         (Some(o), _) => ToolFilter::Only(o),
         (_, Some(e)) => ToolFilter::AllExcept(e),
         _ => ToolFilter::All,
     };
-    let disabled: Vec<&str> = ctx
-        .agent
+    let disabled: Vec<&str> = agent
         .config
         .disabled_tools
         .iter()
@@ -182,11 +209,11 @@ async fn tools(lua: Lua, (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table)) -> Lua
     let mut defs =
         ToolRegistry::global().definitions(&vars, &ctx_desc, model.supports_tool_examples());
 
-    if include_mcp && let Some(ref mcp) = ctx.agent.mcp {
+    if include_mcp && let Some(ref mcp) = agent.mcp {
         mcp.extend_tools(&mut defs);
     }
 
-    json_to_lua(&lua, &defs)
+    Ok((json_to_lua(&lua, &defs)?, None))
 }
 
 /// Returns `(text, err)`. While the child runs, `opts.on_live_buf`
@@ -199,7 +226,11 @@ async fn call_tool(
     (ctx, name, input, opts): (mlua::UserDataRef<LuaCtx>, String, LuaValue, Option<Table>),
 ) -> LuaResult<(Option<String>, Option<String>)> {
     let input_json = lua_to_json(&input)?;
-    let mut tctx = ctx.agent.to_tool_context();
+    let agent = match dispatch_ctx(&ctx, "call_tool") {
+        Ok(a) => a,
+        Err(e) => return Ok((None, Some(e))),
+    };
+    let mut tctx = agent.to_tool_context();
     let (mut on_buf, mut on_ann, mut rx) = (None, None, None);
     if let Some(o) = opts {
         if let Some(secs) = o.get::<Option<u64>>("timeout")? {
@@ -444,11 +475,11 @@ fn call_local_tool(
 
 /// `opts.local_tools` both advertises definitions to the model and dispatches
 /// to the Lua handler, so they cannot drift apart.
-async fn session(
-    lua: Lua,
-    (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table),
-) -> LuaResult<mlua::AnyUserData> {
-    let agent_ctx = ctx.agent.clone();
+async fn session(lua: Lua, (ctx, opts): (mlua::UserDataRef<LuaCtx>, Table)) -> LuaResult<LuaPair> {
+    let agent_ctx = match dispatch_ctx(&ctx, "session") {
+        Ok(a) => a.clone(),
+        Err(e) => return Ok(err_pair(e)),
+    };
     drop(ctx);
     let model_spec: Option<String> = opts.get("model_spec")?;
     let system: Option<String> = opts.get("system")?;
@@ -457,8 +488,10 @@ async fn session(
     let name: Option<String> = opts.get("name")?;
     let thinking_val: Option<LuaValue> = opts.get("thinking")?;
     let audience = match opts.get::<Option<String>>("audience")? {
-        Some(s) => ToolAudience::parse_name(&s)
-            .ok_or_else(|| mlua::Error::runtime(format!("unknown audience: {s}")))?,
+        Some(s) => match ToolAudience::parse_name(&s) {
+            Some(a) => a,
+            None => return Ok(err_pair(format!("unknown audience: {s}"))),
+        },
         None => DEFAULT_SESSION_AUDIENCE,
     };
     let fast: bool = opts
@@ -467,10 +500,14 @@ async fn session(
 
     let (model, provider): (Model, Arc<dyn provider::Provider>) = if let Some(ref spec) = model_spec
     {
-        let mut m = Model::from_spec(spec).map_err(mlua::Error::runtime)?;
-        let p = provider::from_model_async(&mut m, agent_ctx.timeouts)
-            .await
-            .map_err(mlua::Error::runtime)?;
+        let mut m = match Model::from_spec(spec) {
+            Ok(m) => m,
+            Err(e) => return Ok(err_pair(e.to_string())),
+        };
+        let p = match provider::from_model_async(&mut m, agent_ctx.timeouts).await {
+            Ok(p) => p,
+            Err(e) => return Ok(err_pair(e.to_string())),
+        };
         (m, Arc::from(p))
     } else {
         (
@@ -500,13 +537,17 @@ async fn session(
         let defs = tools_json.as_array_mut().expect("checked above");
         for pair in tbl.pairs::<String, Table>() {
             let (name, spec) = pair?;
-            let description: String = spec.get("description").map_err(|_| {
-                mlua::Error::runtime(format!("local_tools.{name}: 'description' is required"))
-            })?;
+            let Ok(description) = spec.get::<String>("description") else {
+                return Ok(err_pair(format!(
+                    "local_tools.{name}: 'description' is required"
+                )));
+            };
             let input_schema = lua_to_json(&spec.get::<LuaValue>("input_schema")?)?;
-            let handler: Function = spec.get("handler").map_err(|_| {
-                mlua::Error::runtime(format!("local_tools.{name}: 'handler' is required"))
-            })?;
+            let Ok(handler) = spec.get::<Function>("handler") else {
+                return Ok(err_pair(format!(
+                    "local_tools.{name}: 'handler' is required"
+                )));
+            };
             defs.push(serde_json::json!({
                 "name": name,
                 "description": description,
@@ -525,7 +566,7 @@ async fn session(
         Some(LuaValue::String(s)) => match s.to_str()?.as_ref() {
             "off" => ThinkingConfig::Off,
             "adaptive" => ThinkingConfig::Adaptive,
-            other => return Err(mlua::Error::runtime(format!("invalid thinking: {other}"))),
+            other => return Ok(err_pair(format!("invalid thinking: {other}"))),
         },
         Some(LuaValue::Integer(n)) => ThinkingConfig::Budget(n as u32),
         Some(LuaValue::Number(n)) => ThinkingConfig::Budget(n as u32),
@@ -620,9 +661,10 @@ async fn session(
         closed: false,
     };
 
-    lua.create_userdata(LuaSession {
+    let sess = lua.create_userdata(LuaSession {
         inner: Arc::new(AsyncMutex::new(state)),
-    })
+    })?;
+    Ok((LuaValue::UserData(sess), None))
 }
 
 #[cfg(test)]

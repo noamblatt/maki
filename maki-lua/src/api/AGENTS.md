@@ -10,3 +10,16 @@ Our goal is to let plugin authors have as much freedom as possible, that's why d
 
 Fallible runtime operations return the pair (value, err) and never throw.
 Throwing is reserved for programmer errors, like passing a number where a string belongs.
+
+## Tool ctx
+
+One `LuaCtx` userdata type (util/ctx.rs) serves handler, `start`, and restore
+invocations, built by `LuaCtx::handler/start/restore`. Capabilities a kind
+lacks are `None` fields; their methods still exist and return
+`(nil, "<method> not available in <kind> ctx")` instead of throwing, so
+callers probe without pcall. Dispatch (`maki.agent.*`) is structurally
+handler-only: the `agent` field is `None` elsewhere.
+
+`maki.agent.*` follows the strict pair rule: wrong argument types throw;
+every value or runtime failure (unknown prompt_id/audience, bad spec,
+missing capability) returns `(nil, err)`.

@@ -5,56 +5,18 @@ use std::time::{Duration, Instant};
 
 use maki_agent::agent::LoadedInstructions;
 use maki_agent::cancel::CancelToken;
-use maki_agent::tools::{Deadline, FileReadTracker, LocalTools, ToolContext, ToolLive};
+use maki_agent::tools::{
+    Deadline, FileReadTracker, LocalTools, ToolAudience, ToolContext, ToolLive,
+};
 use maki_config::{AgentConfig, ToolOutputLines};
-use mlua::{Lua, LuaSerdeExt, MultiValue, Table, UserData, UserDataMethods, Value as LuaValue};
+use mlua::{LuaSerdeExt, MultiValue, UserData, UserDataMethods, Value as LuaValue};
 
 use crate::api::tool::ToolCallReply;
 use crate::api::ui::buf::BufHandle;
+use crate::api::util::convert::json_to_lua;
 use crate::runtime::{active_task, lock_cell};
 
 const DEADLINE_ALREADY_SET_MSG: &str = "ctx:set_deadline() already called";
-
-/// The restore ctx is a plain table, not a userdata, so a plugin that
-/// drives another tool's restore (batch composes children this way) can
-/// build the same shape itself.
-pub(crate) fn restore_ctx(
-    lua: &Lua,
-    tool_output_lines: ToolOutputLines,
-    state: Option<serde_json::Value>,
-) -> mlua::Result<Table> {
-    let t = lua.create_table()?;
-    t.set(
-        "tool_output_lines",
-        lua.create_function(move |lua, _: MultiValue| lua.to_value(&tool_output_lines))?,
-    )?;
-    t.set(
-        "state",
-        lua.create_function(move |lua, _: MultiValue| match &state {
-            Some(v) => crate::api::util::convert::json_to_lua(lua, v),
-            None => Ok(LuaValue::Nil),
-        })?,
-    )?;
-    Ok(t)
-}
-
-/// The `start` hook runs before permission checks, so its ctx only lets a
-/// tool publish a preview; dispatching tools from it is structurally
-/// impossible.
-pub(crate) struct StartCtx {
-    pub(crate) tool_output_lines: ToolOutputLines,
-}
-
-impl UserData for StartCtx {
-    fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method("live_buf", |lua, _this, buf: mlua::AnyUserData| {
-            send_live_buf(lua, &buf)
-        });
-        methods.add_method("tool_output_lines", |lua, this, ()| {
-            lua.to_value(&this.tool_output_lines)
-        });
-    }
-}
 
 fn send_live_buf(lua: &mlua::Lua, buf: &mlua::AnyUserData) -> mlua::Result<()> {
     let shared = buf.borrow::<BufHandle>().map(|h| Arc::clone(&h.buf))?;
@@ -111,55 +73,166 @@ impl AgentContext {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CtxKind {
+    Handler,
+    Start,
+    Restore,
+}
+
+impl CtxKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Handler => "handler",
+            Self::Start => "start",
+            Self::Restore => "restore",
+        }
+    }
+}
+
+/// One ctx type for handler, `start`, and restore invocations. Capabilities
+/// a kind lacks are `None`; their methods return `(nil, err)` instead of
+/// not existing, so callers can probe without pcall.
 pub(crate) struct LuaCtx {
+    kind: CtxKind,
     pub(crate) cancel: CancelToken,
-    pub(crate) config: AgentConfig,
-    pub(crate) tool_output_lines: ToolOutputLines,
+    tool_output_lines: ToolOutputLines,
+    config: Option<AgentConfig>,
+    workflow: bool,
+    audience: ToolAudience,
     pub(crate) finish_tx: Option<flume::Sender<ToolCallReply>>,
-    pub(crate) file_tracker: Arc<FileReadTracker>,
-    pub(crate) loaded_instructions: LoadedInstructions,
-    pub(crate) agent: AgentContext,
+    file_tracker: Option<Arc<FileReadTracker>>,
+    loaded_instructions: Option<LoadedInstructions>,
+    /// Dispatch capability: only handler ctxs can call `maki.agent.*`.
+    pub(crate) agent: Option<AgentContext>,
+    state: Option<serde_json::Value>,
+}
+
+impl LuaCtx {
+    pub(crate) fn handler(ctx: &ToolContext) -> Self {
+        Self {
+            kind: CtxKind::Handler,
+            cancel: ctx.cancel.clone(),
+            tool_output_lines: ctx.tool_output_lines,
+            config: Some(ctx.config.clone()),
+            workflow: ctx.workflow,
+            audience: ctx.audience,
+            finish_tx: None,
+            file_tracker: Some(Arc::clone(&ctx.file_tracker)),
+            loaded_instructions: Some(ctx.loaded_instructions.clone()),
+            agent: Some(AgentContext::from(ctx)),
+            state: None,
+        }
+    }
+
+    pub(crate) fn start(ctx: &ToolContext) -> Self {
+        Self {
+            kind: CtxKind::Start,
+            cancel: ctx.cancel.clone(),
+            tool_output_lines: ctx.tool_output_lines,
+            config: Some(ctx.config.clone()),
+            workflow: ctx.workflow,
+            audience: ctx.audience,
+            finish_tx: None,
+            file_tracker: None,
+            loaded_instructions: None,
+            agent: None,
+            state: None,
+        }
+    }
+
+    pub(crate) fn restore(
+        tool_output_lines: ToolOutputLines,
+        state: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            kind: CtxKind::Restore,
+            cancel: CancelToken::none(),
+            tool_output_lines,
+            config: None,
+            workflow: false,
+            audience: ToolAudience::default(),
+            finish_tx: None,
+            file_tracker: None,
+            loaded_instructions: None,
+            agent: None,
+            state,
+        }
+    }
+
+    pub(crate) fn cap_err(&self, method: &str) -> String {
+        format!("{method} not available in {} ctx", self.kind.name())
+    }
+
+    fn cap_err_pair(&self, method: &str) -> (LuaValue, Option<String>) {
+        (LuaValue::Nil, Some(self.cap_err(method)))
+    }
 }
 
 impl UserData for LuaCtx {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method("cancelled", |_, this, ()| Ok(this.cancel.is_cancelled()));
 
-        methods.add_method("workflow", |_, this, ()| Ok(this.agent.workflow));
-
-        methods.add_method("audience", |_, this, ()| {
-            Ok(this.agent.audience.name().unwrap_or("main"))
+        methods.add_method("workflow", |_, this, ()| {
+            if this.kind == CtxKind::Restore {
+                return Ok(this.cap_err_pair("workflow"));
+            }
+            Ok((LuaValue::Boolean(this.workflow), None))
         });
 
-        methods.add_method("live_buf", |lua, _this, buf: mlua::AnyUserData| {
-            send_live_buf(lua, &buf)
+        methods.add_method("audience", |lua, this, ()| {
+            if this.kind == CtxKind::Restore {
+                return Ok(this.cap_err_pair("audience"));
+            }
+            let name = lua.create_string(this.audience.name().unwrap_or("main"))?;
+            Ok((LuaValue::String(name), None))
+        });
+
+        methods.add_method("live_buf", |lua, this, buf: mlua::AnyUserData| {
+            if this.kind == CtxKind::Restore {
+                return Ok(this.cap_err_pair("live_buf"));
+            }
+            send_live_buf(lua, &buf)?;
+            Ok((LuaValue::Nil, None))
         });
 
         methods.add_method("config", |lua, this, args: MultiValue| {
-            let config_val = lua.to_value(&this.config)?;
+            let Some(config) = &this.config else {
+                return Ok(this.cap_err_pair("config"));
+            };
+            let config_val = lua.to_value(config)?;
             if args.is_empty() {
-                return Ok(config_val);
+                return Ok((config_val, None));
             }
             let key: String = lua.from_value(args[0].clone())?;
             let default = args.get(1).cloned().unwrap_or(LuaValue::Nil);
-            match config_val {
+            let val = match config_val {
                 LuaValue::Table(ref tbl) => {
                     let val = tbl.raw_get::<LuaValue>(key.as_str())?;
                     if matches!(val, LuaValue::Nil) {
-                        Ok(default)
+                        default
                     } else {
-                        Ok(val)
+                        val
                     }
                 }
-                _ => Ok(default),
-            }
+                _ => default,
+            };
+            Ok((val, None))
         });
 
         methods.add_method("tool_output_lines", |lua, this, ()| {
             lua.to_value(&this.tool_output_lines)
         });
 
-        methods.add_method("set_deadline", |lua, _this, secs: u64| {
+        methods.add_method("state", |lua, this, ()| match &this.state {
+            Some(v) => json_to_lua(lua, v),
+            None => Ok(LuaValue::Nil),
+        });
+
+        methods.add_method("set_deadline", |lua, this, secs: u64| {
+            if this.kind != CtxKind::Handler {
+                return Ok(this.cap_err_pair("set_deadline"));
+            }
             let handle = active_task(lua);
             let cell = handle.lock().unwrap_or_else(|e| e.into_inner());
             if cell.deadline_secs.get().is_some() {
@@ -168,25 +241,34 @@ impl UserData for LuaCtx {
             cell.deadline_secs.set(Some(secs));
             cell.deadline
                 .set(Some(Instant::now() + Duration::from_secs(secs)));
-            Ok(())
+            Ok((LuaValue::Nil, None))
         });
 
         methods.add_method("record_read", |_, this, path: String| {
-            this.file_tracker.record_read(Path::new(&path));
-            Ok(())
+            let Some(tracker) = &this.file_tracker else {
+                return Ok(this.cap_err_pair("record_read"));
+            };
+            tracker.record_read(Path::new(&path));
+            Ok((LuaValue::Nil, None))
         });
 
         methods.add_method("check_before_edit", |_, this, path: String| {
-            match this.file_tracker.check_before_edit(Path::new(&path)) {
-                Ok(()) => Ok((true, Option::<String>::None)),
-                Err(msg) => Ok((false, Some(msg))),
+            let Some(tracker) = &this.file_tracker else {
+                return Ok(this.cap_err_pair("check_before_edit"));
+            };
+            match tracker.check_before_edit(Path::new(&path)) {
+                Ok(()) => Ok((LuaValue::Boolean(true), None)),
+                Err(msg) => Ok((LuaValue::Boolean(false), Some(msg))),
             }
         });
 
         methods.add_async_method(
             "find_instructions",
             |lua, this, dir_path: String| async move {
-                let loaded = this.loaded_instructions.clone();
+                let Some(loaded) = this.loaded_instructions.clone() else {
+                    let (v, e) = this.cap_err_pair("find_instructions");
+                    return Ok((v, e));
+                };
                 let results = smol::unblock(move || {
                     let cwd = std::env::current_dir().unwrap_or_default();
                     let abs = resolve_abs_with_cwd(dir_path, &cwd);
@@ -200,7 +282,7 @@ impl UserData for LuaCtx {
                     entry.set("content", content)?;
                     tbl.set(i + 1, entry)?;
                 }
-                Ok(tbl)
+                Ok((LuaValue::Table(tbl), None))
             },
         );
 
@@ -209,6 +291,9 @@ impl UserData for LuaCtx {
         });
 
         methods.add_method_mut("finish", |lua, this, val: LuaValue| {
+            if this.kind != CtxKind::Handler {
+                return Ok(this.cap_err_pair("finish"));
+            }
             let tx = this
                 .finish_tx
                 .take()
@@ -218,7 +303,7 @@ impl UserData for LuaCtx {
                 lock_cell(&active_task(lua)).root_buf = Some(buf);
             }
             let _ = tx.send(ToolCallReply::from_lua_value(&val));
-            Ok(())
+            Ok((LuaValue::Nil, None))
         });
     }
 }
@@ -292,5 +377,44 @@ mod tests {
         assert_eq!(inner.tool_use_id, None);
         assert!(inner.live_sink.is_none(), "sink must not be inherited");
         assert_eq!(agent.tool_use_id.as_deref(), Some(TOOL_USE_ID));
+    }
+
+    #[test]
+    fn handler_ctx_has_full_capabilities() {
+        let ctx = LuaCtx::handler(&populated_ctx());
+        assert_eq!(ctx.kind, CtxKind::Handler);
+        assert!(ctx.agent.is_some());
+        assert!(ctx.file_tracker.is_some());
+        assert!(ctx.config.is_some());
+        assert!(ctx.loaded_instructions.is_some());
+        assert!(ctx.state.is_none());
+    }
+
+    #[test]
+    fn start_ctx_has_config_but_no_dispatch() {
+        let ctx = LuaCtx::start(&populated_ctx());
+        assert_eq!(ctx.kind, CtxKind::Start);
+        assert!(ctx.config.is_some());
+        assert!(ctx.agent.is_none(), "start ctx must never dispatch tools");
+        assert!(ctx.file_tracker.is_none());
+        assert!(ctx.loaded_instructions.is_none());
+    }
+
+    #[test]
+    fn restore_ctx_carries_state_only() {
+        let state = serde_json::json!({ "n": 1 });
+        let ctx = LuaCtx::restore(ToolOutputLines::default(), Some(state.clone()));
+        assert_eq!(ctx.kind, CtxKind::Restore);
+        assert!(ctx.config.is_none());
+        assert!(ctx.agent.is_none());
+        assert!(ctx.file_tracker.is_none());
+        assert!(!ctx.cancel.is_cancelled());
+        assert_eq!(ctx.state, Some(state));
+    }
+
+    #[test]
+    fn cap_err_names_the_ctx_kind() {
+        let ctx = LuaCtx::restore(ToolOutputLines::default(), None);
+        assert_eq!(ctx.cap_err("finish"), "finish not available in restore ctx");
     }
 }
