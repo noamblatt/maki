@@ -288,7 +288,7 @@ impl<'t> EventLoop<'t> {
                 images: Vec::new(),
             };
             let actions = self.sessions[self.focused].app.handle_submit(sub);
-            self.dispatch(actions);
+            self.dispatch(self.focused, actions);
         }
         loop {
             self.tick();
@@ -304,34 +304,25 @@ impl<'t> EventLoop<'t> {
     }
 
     fn tick(&mut self) {
-        self.sessions[self.focused].app.tick_edge_scroll();
-        self.sessions[self.focused].app.tick_error_expiry();
-        self.sessions[self.focused].app.poll_image_paste();
-        self.sessions[self.focused].app.btw_modal.poll();
-        self.sessions[self.focused].app.status_bar.poll_branch_update();
-        self.sessions[self.focused].app.mcp_picker.refresh();
-        self.sessions[self.focused].app.float_mgr.tick();
+        // Only the focused session drives UI-affecting timers/pollers; the
+        // background sessions still make agent progress via drain_channels.
+        let rt = &mut self.sessions[self.focused];
+        rt.app.tick_edge_scroll();
+        rt.app.tick_error_expiry();
+        rt.app.poll_image_paste();
+        rt.app.btw_modal.poll();
+        rt.app.status_bar.poll_branch_update();
+        rt.app.mcp_picker.refresh();
+        rt.app.float_mgr.tick();
     }
 
     fn drain_channels(&mut self) -> bool {
-        while let Ok(event) = self.sessions[self.focused].shell_rx.try_recv() {
-            self.sessions[self.focused].app.handle_shell_event(event);
-        }
-
         let mut had_agent_msg = false;
-        loop {
-            match self.sessions[self.focused].handles.agent_rx.try_recv() {
-                Ok(envelope) => {
-                    had_agent_msg = true;
-                    let actions = self.sessions[self.focused].app.update(Msg::Agent(Box::new(envelope)));
-                    self.dispatch(actions);
-                }
-                Err(flume::TryRecvError::Disconnected) if self.sessions[self.focused].app.status == Status::Streaming => {
-                    self.sessions[self.focused].app.status = Status::error("agent stopped unexpectedly".into());
-                    break;
-                }
-                Err(_) => break,
-            }
+
+        // Every session advances, focused or not, so background work keeps
+        // progressing while the user supervises from another session/dashboard.
+        for idx in 0..self.sessions.len() {
+            had_agent_msg |= self.drain_session(idx);
         }
 
         while let Ok(warning) = self.warn_rx.try_recv() {
@@ -339,7 +330,9 @@ impl<'t> EventLoop<'t> {
         }
 
         let slot_model = self.model_slot.load();
-        if slot_model.model.context_window != self.sessions[self.focused].app.state.model.context_window {
+        if slot_model.model.context_window
+            != self.sessions[self.focused].app.state.model.context_window
+        {
             self.sessions[self.focused].app.update_model(&slot_model.model);
         }
 
@@ -397,7 +390,7 @@ impl<'t> EventLoop<'t> {
 
         if let Some(msg) = self.translate_input()? {
             let actions = self.sessions[self.focused].app.update(msg);
-            self.dispatch(actions);
+            self.dispatch(self.focused, actions);
         }
         Ok(())
     }
@@ -424,7 +417,7 @@ impl<'t> EventLoop<'t> {
                 );
                 if let Some(extra) = extra {
                     let actions = self.sessions[self.focused].app.update(scroll);
-                    self.dispatch(actions);
+                    self.dispatch(self.focused, actions);
                     Some(extra)
                 } else {
                     Some(scroll)
@@ -433,24 +426,50 @@ impl<'t> EventLoop<'t> {
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (drag, extra) = coalesce_drag(mouse);
                 let actions = self.sessions[self.focused].app.update(Msg::Mouse(drag));
-                self.dispatch(actions);
+                self.dispatch(self.focused, actions);
                 extra
             }
             _ => Some(Msg::Mouse(mouse)),
         }
     }
 
-    fn dispatch(&mut self, actions: Vec<Action>) {
+    fn drain_session(&mut self, idx: usize) -> bool {
+        while let Ok(event) = self.sessions[idx].shell_rx.try_recv() {
+            self.sessions[idx].app.handle_shell_event(event);
+        }
+
+        let mut had_agent_msg = false;
+        loop {
+            match self.sessions[idx].handles.agent_rx.try_recv() {
+                Ok(envelope) => {
+                    had_agent_msg = true;
+                    let actions = self.sessions[idx].app.update(Msg::Agent(Box::new(envelope)));
+                    self.dispatch(idx, actions);
+                }
+                Err(flume::TryRecvError::Disconnected)
+                    if self.sessions[idx].app.status == Status::Streaming =>
+                {
+                    self.sessions[idx].app.status =
+                        Status::error("agent stopped unexpectedly".into());
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        had_agent_msg
+    }
+
+    fn dispatch(&mut self, idx: usize, actions: Vec<Action>) {
         for action in actions {
-            self.handle_action(action);
+            self.handle_action(idx, action);
         }
     }
 
-    fn respawn_agent(&mut self, history: Vec<Message>) {
+    fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
         let model_slot = Arc::clone(&self.model_slot);
         let permissions = Arc::clone(&self.permissions);
         let config = self.config.clone();
-        let rt = &mut self.sessions[self.focused];
+        let rt = &mut self.sessions[idx];
         let lua_handle = rt.app.lua_event_handle.clone();
         let tool_output_lines = rt.app.ui_config.tool_output_lines;
         rt.handles.respawn(
@@ -464,13 +483,13 @@ impl<'t> EventLoop<'t> {
         );
     }
 
-    fn handle_action(&mut self, action: Action) {
+    fn handle_action(&mut self, idx: usize, action: Action) {
         match action {
             Action::SendMessage(input) => {
                 let mut input = *input;
-                input.preamble = self.sessions[self.focused].app.shell.drain_results();
-                let run_id = self.sessions[self.focused].app.run_id;
-                self.sessions[self.focused].handles.queue.push(QueueItem::Message {
+                input.preamble = self.sessions[idx].app.shell.drain_results();
+                let run_id = self.sessions[idx].app.run_id;
+                self.sessions[idx].handles.queue.push(QueueItem::Message {
                     text: input.message.clone(),
                     image_count: input.images.len(),
                     input,
@@ -479,17 +498,19 @@ impl<'t> EventLoop<'t> {
                 });
             }
             Action::CancelAgent { run_id } => {
-                let _ = self.sessions[self.focused].handles
+                let _ = self.sessions[idx]
+                    .handles
                     .cmd_tx
                     .try_send(AgentCommand::Cancel { run_id });
             }
             Action::CancelSubagent { tool_use_id } => {
-                let _ = self.sessions[self.focused].handles
+                let _ = self.sessions[idx]
+                    .handles
                     .cmd_tx
                     .try_send(AgentCommand::CancelSubagent { tool_use_id });
             }
             Action::NewSession => {
-                self.respawn_agent(Vec::new());
+                self.respawn_agent(idx, Vec::new());
             }
             Action::LoadSession(loaded) => {
                 let loaded = *loaded;
@@ -497,14 +518,15 @@ impl<'t> EventLoop<'t> {
                     && let Ok(mut new_model) = Model::from_spec(&loaded.model_spec)
                     && let Ok(new_provider) = from_model(&mut new_model, self.timeouts)
                 {
-                    self.sessions[self.focused].app.usage_slot.store(None);
+                    self.sessions[idx].app.usage_slot.store(None);
                     self.model_slot.store(Arc::new(ModelSlot {
                         model: new_model,
                         provider: Arc::from(new_provider),
                     }));
                 }
-                self.respawn_agent(loaded.messages);
-                *self.sessions[self.focused].handles
+                self.respawn_agent(idx, loaded.messages);
+                *self.sessions[idx]
+                    .handles
                     .tool_outputs
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
@@ -512,18 +534,18 @@ impl<'t> EventLoop<'t> {
             Action::ChangeModel(spec) => self.change_model(spec),
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
-                maki_providers::model_registry::set_and_persist(spec, tier, &self.sessions[self.focused].app.storage);
+                maki_providers::model_registry::set_and_persist(spec, tier, &self.sessions[idx].app.storage);
             }
             Action::UnassignTier(spec, tier) => {
-                maki_providers::model_registry::unset_and_persist(&spec, tier, &self.sessions[self.focused].app.storage);
+                maki_providers::model_registry::unset_and_persist(&spec, tier, &self.sessions[idx].app.storage);
             }
             Action::Compact => {
-                self.sessions[self.focused].handles.queue.push(QueueItem::Compact {
-                    run_id: self.sessions[self.focused].app.run_id,
+                self.sessions[idx].handles.queue.push(QueueItem::Compact {
+                    run_id: self.sessions[idx].app.run_id,
                 });
             }
             Action::ToggleMcp(server_name, enabled) => {
-                self.sessions[self.focused].handles.send_mcp(McpCommand::Toggle {
+                self.sessions[idx].handles.send_mcp(McpCommand::Toggle {
                     server: server_name,
                     enabled,
                 });
@@ -534,32 +556,35 @@ impl<'t> EventLoop<'t> {
                 visible,
             } => {
                 let (trigger, cancel) = CancelToken::new();
-                self.sessions[self.focused].app.shell.add_trigger(trigger);
+                self.sessions[idx].app.shell.add_trigger(trigger);
                 spawn_shell(
                     command,
                     id,
                     visible,
-                    self.sessions[self.focused].shell_tx.clone(),
+                    self.sessions[idx].shell_tx.clone(),
                     cancel,
                     self.config.clone(),
                 );
             }
             Action::OpenEditor(path) => {
                 if let Err(e) = terminal::open_in_editor(&path, self.terminal) {
-                    self.sessions[self.focused].app.flash(e);
+                    self.sessions[idx].app.flash(e);
                 }
             }
             Action::EditInputInEditor => {
-                let current_text = self.sessions[self.focused].app.input_box.buffer.value();
+                let current_text = self.sessions[idx].app.input_box.buffer.value();
                 match terminal::edit_temp_content(&current_text, self.terminal) {
-                    Ok(edited) => self.sessions[self.focused].app.input_box.set_input(edited),
-                    Err(e) => self.sessions[self.focused].app.flash(e),
+                    Ok(edited) => self.sessions[idx].app.input_box.set_input(edited),
+                    Err(e) => self.sessions[idx].app.flash(e),
                 }
             }
             Action::Btw(question) => {
                 let slot = self.model_slot.load();
-                self.sessions[self.focused].app
-                    .start_btw(question, Arc::clone(&slot.provider), slot.model.clone());
+                self.sessions[idx].app.start_btw(
+                    question,
+                    Arc::clone(&slot.provider),
+                    slot.model.clone(),
+                );
             }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::RefreshModels => self.refresh_models(),
