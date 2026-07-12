@@ -693,13 +693,21 @@ struct JsonlHeader {
 }
 
 #[derive(Deserialize)]
+struct ScanMeta {
+    #[serde(default)]
+    status: SessionStatus,
+    #[serde(default)]
+    summary: Option<String>,
+}
+
+#[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 enum ScanRecord {
     Meta {
         title: String,
         updated_at: u64,
         #[serde(flatten)]
-        meta: SessionMeta,
+        meta: Box<ScanMeta>,
     },
     #[serde(other)]
     Other,
@@ -952,7 +960,7 @@ mod tests {
         CWD_INDEX_FILE, DEFAULT_TITLE, MAX_TITLE_LEN, SESSION_VERSION, TAIL_BUF, generate_title,
         load_cwd_index, update_cwd_index,
     };
-    use super::{Session, SessionError, SessionLog, StorageError, TitleSource};
+    use super::{Session, SessionError, SessionLog, SessionStatus, StorageError, TitleSource};
     use serde_json::Value;
     use std::collections::HashMap;
     use std::fs::{self, OpenOptions};
