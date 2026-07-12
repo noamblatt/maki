@@ -17,6 +17,8 @@ use ratatui::widgets::{Block, Borders, Widget};
 
 use super::{App, Mode, Status};
 
+const DASHBOARD_INPUT_PLACEHOLDER: &str = "Describe a task for a new session";
+
 struct ViewLayout {
     msg_area: Rect,
     bottom_area: Rect,
@@ -156,6 +158,11 @@ impl App {
     }
 
     fn render_bottom_panel(&mut self, frame: &mut Frame, layout: &ViewLayout) {
+        // The dashboard renders the shared input box inside its own panel, so
+        // skip the normal bottom-panel input to avoid a duplicate.
+        if self.session_dashboard.is_open() {
+            return;
+        }
         if self.permission_prompt.is_open() {
             self.permission_prompt.view(frame, layout.bottom_area);
         } else if !self.is_main_chat() {
@@ -212,6 +219,42 @@ impl App {
         }
     }
 
+    /// Single-line new-session prompt for the dashboard, backed by the shared
+    /// input box state (so `/` commands, file picker, and image paste all work).
+    fn render_dashboard_input(&mut self, frame: &mut Frame, area: Rect) {
+        use ratatui::widgets::Paragraph;
+
+        let theme = crate::theme::current();
+        let text = self.input_box.buffer.value();
+        let images = self.input_box.pending_image_count();
+
+        let line = if text.is_empty() && images == 0 {
+            Line::from(vec![
+                crate::components::chevron_span(),
+                Span::styled(DASHBOARD_INPUT_PLACEHOLDER, theme.input_placeholder),
+            ])
+        } else {
+            let cursor_x = self.input_box.buffer.x();
+            let chars: Vec<char> = text.chars().collect();
+            let before: String = chars[..cursor_x.min(chars.len())].iter().collect();
+            let cursor_char = chars.get(cursor_x).copied().unwrap_or(' ');
+            let after_start = cursor_x.saturating_add(1).min(chars.len());
+            let after: String = chars[after_start..].iter().collect();
+            let mut spans = vec![crate::components::chevron_span()];
+            if images > 0 {
+                spans.push(Span::styled(format!("[{images} image] "), theme.tool_dim));
+            }
+            spans.push(Span::raw(before));
+            spans.push(Span::styled(cursor_char.to_string(), theme.cursor));
+            spans.push(Span::raw(after));
+            Line::from(spans)
+        };
+        frame.render_widget(Paragraph::new(vec![line]), area);
+
+        // Command palette floats above the input line when the user types `/`.
+        self.command_palette.view(frame, area);
+    }
+
     fn render_splits(&mut self, frame: &mut Frame, layout: &ViewLayout) {
         for dir in Split::ALL {
             if let Some(rect) = layout.splits.rect(dir) {
@@ -241,20 +284,9 @@ impl App {
 
         if self.session_dashboard.is_open() {
             self.session_dashboard.tick();
-            let layout = self.session_dashboard.view(frame, full);
-            overlay_rect = layout.popup;
-            // Render the shared input box inside the Agents panel so the
-            // new-session prompt gets full editing, file picker, image paste,
-            // and `/` command suggestions.
-            self.input_box.view(
-                frame,
-                layout.input_area,
-                false,
-                self.separator_style(),
-                true,
-                None,
-            );
-            self.command_palette.view(frame, layout.input_area);
+            let dash = self.session_dashboard.view(frame, full);
+            overlay_rect = dash.popup;
+            self.render_dashboard_input(frame, dash.input_area);
             if let Some(flash) = self.session_dashboard.take_flash() {
                 self.status_bar.flash(flash);
             }

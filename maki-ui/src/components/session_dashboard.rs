@@ -242,31 +242,23 @@ impl SessionDashboard {
     }
 
     /// Renders the session list and the titled "New session" separator, and
-    /// returns the `Rect` where the caller should render the shared input box
-    /// (so it lives inside the same panel column, right under the list).
+    /// returns the single-row `Rect` where the caller should render the input
+    /// line (inside the same panel column, right under the list).
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> DashboardLayout {
         use ratatui::widgets::{Block, BorderType, Borders};
 
-        const INPUT_ROWS: u16 = 3;
-        const SEPARATOR_ROW: u16 = 1;
-
-        // Reserve rows at the bottom for the "New session" separator + input,
-        // letting the picker modal center itself in the space above.
-        let [list_area, bottom] = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(SEPARATOR_ROW + INPUT_ROWS),
-        ])
-        .areas(area);
+        // One titled separator row + one input row = a clean single-line prompt.
+        let [list_area, bottom] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area);
 
         let popup = self.picker.view(frame, list_area);
 
-        // A single titled rule under the list, aligned to the popup column.
         let theme = crate::theme::current();
         let sep_area = Rect {
             x: popup.x,
             y: bottom.y,
             width: popup.width.max(1),
-            height: SEPARATOR_ROW,
+            height: 1,
         };
         let block = Block::default()
             .borders(Borders::TOP)
@@ -276,10 +268,10 @@ impl SessionDashboard {
         frame.render_widget(block, sep_area);
 
         let input_area = Rect {
-            x: popup.x,
-            y: bottom.y + SEPARATOR_ROW,
-            width: popup.width.max(1),
-            height: INPUT_ROWS.min(bottom.height.saturating_sub(SEPARATOR_ROW)),
+            x: popup.x + 1,
+            y: bottom.y + 1,
+            width: popup.width.saturating_sub(2).max(1),
+            height: 1,
         };
 
         DashboardLayout { popup, input_area }
@@ -287,7 +279,8 @@ impl SessionDashboard {
 }
 
 /// Where the dashboard drew itself: `popup` is the modal rect (for overlay
-/// bookkeeping), `input_area` is where the caller renders the shared input box.
+/// bookkeeping), `input_area` is the single row where the caller renders the
+/// new-session input line.
 pub struct DashboardLayout {
     pub popup: Rect,
     pub input_area: Rect,
