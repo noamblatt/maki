@@ -24,6 +24,10 @@ const SECTION_NEEDS_INPUT: &str = "Needs input";
 const SECTION_WORKING: &str = "Working";
 const SECTION_COMPLETED: &str = "Completed";
 
+/// The event loop ticks roughly per frame; refreshing the board about once a
+/// second keeps background status changes visible without hammering storage.
+const REFRESH_INTERVAL_TICKS: u16 = 60;
+
 pub enum DashboardAction {
     Consumed,
     Open(String),
@@ -63,6 +67,9 @@ pub struct SessionDashboard {
     confirming: Option<(String, u64)>,
     pending_rx: Option<flume::Receiver<Result<Vec<DashboardEntry>, String>>>,
     flash: Option<String>,
+    source: Option<(String, StateDir)>,
+    refreshing: bool,
+    ticks_since_refresh: u16,
 }
 
 impl SessionDashboard {
@@ -72,28 +79,18 @@ impl SessionDashboard {
             confirming: None,
             pending_rx: None,
             flash: None,
+            source: None,
+            refreshing: false,
+            ticks_since_refresh: 0,
         }
     }
 
     pub fn open(&mut self, cwd: &str, dir: &StateDir) {
         self.picker.open_loading(TITLE);
-        let cwd = cwd.to_owned();
-        let dir = dir.clone();
-        let (tx, rx) = flume::bounded(1);
-        thread::spawn(move || {
-            let result = AppSession::list(&cwd, &dir)
-                .map(|mut summaries| {
-                    summaries.sort_by(|a, b| {
-                        section_rank(a.status)
-                            .cmp(&section_rank(b.status))
-                            .then(b.updated_at.cmp(&a.updated_at))
-                    });
-                    summaries.into_iter().map(entry_from_summary).collect()
-                })
-                .map_err(|e| format!("Failed to list sessions: {e}"));
-            let _ = tx.send(result);
-        });
-        self.pending_rx = Some(rx);
+        self.source = Some((cwd.to_owned(), dir.clone()));
+        self.refreshing = false;
+        self.ticks_since_refresh = 0;
+        self.pending_rx = Some(spawn_scan(cwd.to_owned(), dir.clone()));
     }
 
     fn try_resolve(&mut self) {
@@ -104,17 +101,41 @@ impl SessionDashboard {
             return;
         };
         self.pending_rx = None;
+        let was_refresh = self.refreshing;
+        self.refreshing = false;
         match result {
             Ok(entries) if entries.is_empty() => {
                 self.picker.resolve(entries);
                 self.picker.set_error_text(Some(NO_SESSIONS_MSG.into()));
             }
+            // A live refresh replaces items in place so the user's current
+            // selection and scroll position survive the status update.
+            Ok(entries) if was_refresh => {
+                self.picker.set_error_text(None);
+                self.picker.replace_items(entries);
+            }
             Ok(entries) => self.picker.resolve(entries),
             Err(e) => {
-                self.picker.resolve(Vec::new());
-                self.picker.set_error_text(Some(e));
+                if !was_refresh {
+                    self.picker.resolve(Vec::new());
+                    self.picker.set_error_text(Some(e));
+                }
             }
         }
+    }
+
+    /// Kick off a background re-scan to reflect status changes from other
+    /// sessions without disturbing the current selection. No-op while an
+    /// initial load or another refresh is in flight.
+    fn refresh(&mut self) {
+        if self.pending_rx.is_some() || self.picker.is_loading() {
+            return;
+        }
+        let Some((cwd, dir)) = self.source.clone() else {
+            return;
+        };
+        self.refreshing = true;
+        self.pending_rx = Some(spawn_scan(cwd, dir));
     }
 
     pub fn take_flash(&mut self) -> Option<String> {
@@ -128,6 +149,8 @@ impl SessionDashboard {
     pub fn close(&mut self) {
         self.picker.close();
         self.pending_rx = None;
+        self.source = None;
+        self.refreshing = false;
     }
 
     pub fn remove_entry(&mut self, id: &str) {
@@ -195,6 +218,12 @@ impl SessionDashboard {
 
     pub fn tick(&mut self) {
         self.try_resolve();
+
+        self.ticks_since_refresh = self.ticks_since_refresh.saturating_add(1);
+        if self.ticks_since_refresh >= REFRESH_INTERVAL_TICKS {
+            self.ticks_since_refresh = 0;
+            self.refresh();
+        }
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
@@ -232,6 +261,24 @@ fn section_label(status: SessionStatus) -> &'static str {
         SessionStatus::Working => SECTION_WORKING,
         SessionStatus::Completed | SessionStatus::Idle | SessionStatus::Error => SECTION_COMPLETED,
     }
+}
+
+fn spawn_scan(cwd: String, dir: StateDir) -> flume::Receiver<Result<Vec<DashboardEntry>, String>> {
+    let (tx, rx) = flume::bounded(1);
+    thread::spawn(move || {
+        let result = AppSession::list(&cwd, &dir)
+            .map(|mut summaries| {
+                summaries.sort_by(|a, b| {
+                    section_rank(a.status)
+                        .cmp(&section_rank(b.status))
+                        .then(b.updated_at.cmp(&a.updated_at))
+                });
+                summaries.into_iter().map(entry_from_summary).collect()
+            })
+            .map_err(|e| format!("Failed to list sessions: {e}"));
+        let _ = tx.send(result);
+    });
+    rx
 }
 
 fn entry_from_summary(s: maki_storage::sessions::SessionSummary) -> DashboardEntry {

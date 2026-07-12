@@ -325,3 +325,35 @@ Verified: `cargo build` (workspace) OK, `cargo clippy --all --tests` clean,
 - Step 5: write status transitions on AgentEvents (Working/NeedsInput/Completed) so the
   sections populate live. Currently all sessions render as Completed/Idle until Tier-2 wiring.
 - Steps 6-9: Tier-2 supervisor (real background concurrency), spawn box, focus switching.
+
+---
+
+## H. Tier 2 COMPLETE (Steps 6-9)
+
+- Step 6a: SessionRuntime{app,handles,shell_tx,shell_rx}; EventLoop holds
+  sessions: Vec<SessionRuntime> + focused: usize. shutdown() drains all runtimes.
+- Step 6b: drain_session(idx) pumps each session's channels into its own App;
+  drain_channels loops over all sessions so background runners progress. dispatch/
+  handle_action/respawn_agent are session-indexed. tick()/render stay focused-only.
+- Step 7: SpawnContext (cloneable process-wide inputs) + build_runtime(). Actions
+  SpawnSession/FocusSession/ShowDashboard. Dashboard: Right/Enter -> FocusSession,
+  Ctrl-N -> SpawnSession. Background sessions that hit a permission prompt flip to
+  NeedsInput and block on their answer channel until focused (matches decision Q3).
+- Step 8: all resources shared via Arc in build_runtime; shutdown stops every runtime.
+- Step 9: dashboard live-refreshes (~1s via REFRESH_INTERVAL_TICKS) using replace_items
+  so selection/scroll survive; background status changes show on the open board.
+
+### Full feature now works
+`maki agents` -> board grouped by status. Right/Enter opens a session (own runtime,
+others keep running in background). Left (empty input) returns to board. Ctrl-N spawns
+a new background session. Ctrl-X deletes. Statuses update live. Multiple sessions run
+concurrently, unlimited.
+
+### Known follow-ups (not blockers)
+- Up/Down to cycle sessions directly from within a session view (Left->board->nav->Right
+  is the working path today).
+- Dashboard is per-App component reused across runtimes (reads shared store); a future
+  cleanup could hoist it to a loop-level screen.
+- Spawn box currently spawns an empty session (Ctrl-N) then you type; a dedicated inline
+  "Describe a task" prompt on the board could pass the initial task in one step
+  (SpawnSession already accepts Some(prompt)).
