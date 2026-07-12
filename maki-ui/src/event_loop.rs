@@ -54,15 +54,24 @@ pub struct EventLoopParams {
     pub dashboard: bool,
 }
 
-pub(crate) struct EventLoop<'t> {
-    terminal: &'t mut ratatui::DefaultTerminal,
+/// One interactive session: its UI `App`, the agent runner driving it, and the
+/// shell channel scoped to that session. The event loop owns a set of these and
+/// focuses one at a time; unfocused runtimes keep making progress because their
+/// agent tasks live on the smol executor regardless of focus.
+pub(crate) struct SessionRuntime {
     app: App,
     handles: AgentHandles,
+    shell_tx: flume::Sender<ShellEvent>,
+    shell_rx: flume::Receiver<ShellEvent>,
+}
+
+pub(crate) struct EventLoop<'t> {
+    terminal: &'t mut ratatui::DefaultTerminal,
+    sessions: Vec<SessionRuntime>,
+    focused: usize,
     model_slot: Arc<ArcSwap<ModelSlot>>,
     config: AgentConfig,
     permissions: Arc<PermissionManager>,
-    shell_tx: flume::Sender<ShellEvent>,
-    shell_rx: flume::Receiver<ShellEvent>,
     warn_rx: flume::Receiver<String>,
     warn_tx: flume::Sender<String>,
     available_models: Arc<ArcSwapOption<Vec<String>>>,
@@ -252,13 +261,16 @@ impl<'t> EventLoop<'t> {
 
         Ok(Self {
             terminal,
-            app,
-            handles,
+            sessions: vec![SessionRuntime {
+                app,
+                handles,
+                shell_tx,
+                shell_rx,
+            }],
+            focused: 0,
             model_slot,
             config,
             permissions,
-            shell_tx,
-            shell_rx,
             warn_rx: bg.warn_rx,
             warn_tx: bg.warn_tx,
             available_models: bg.available,
@@ -275,15 +287,15 @@ impl<'t> EventLoop<'t> {
                 text: prompt,
                 images: Vec::new(),
             };
-            let actions = self.app.handle_submit(sub);
+            let actions = self.sessions[self.focused].app.handle_submit(sub);
             self.dispatch(actions);
         }
         loop {
             self.tick();
             let had_agent_msg = self.drain_channels();
-            self.terminal.draw(|f| self.app.view(f))?;
+            self.terminal.draw(|f| self.sessions[self.focused].app.view(f))?;
 
-            if self.app.exit_request != ExitRequest::None {
+            if self.sessions[self.focused].app.exit_request != ExitRequest::None {
                 return Ok(self.shutdown());
             }
 
@@ -292,30 +304,30 @@ impl<'t> EventLoop<'t> {
     }
 
     fn tick(&mut self) {
-        self.app.tick_edge_scroll();
-        self.app.tick_error_expiry();
-        self.app.poll_image_paste();
-        self.app.btw_modal.poll();
-        self.app.status_bar.poll_branch_update();
-        self.app.mcp_picker.refresh();
-        self.app.float_mgr.tick();
+        self.sessions[self.focused].app.tick_edge_scroll();
+        self.sessions[self.focused].app.tick_error_expiry();
+        self.sessions[self.focused].app.poll_image_paste();
+        self.sessions[self.focused].app.btw_modal.poll();
+        self.sessions[self.focused].app.status_bar.poll_branch_update();
+        self.sessions[self.focused].app.mcp_picker.refresh();
+        self.sessions[self.focused].app.float_mgr.tick();
     }
 
     fn drain_channels(&mut self) -> bool {
-        while let Ok(event) = self.shell_rx.try_recv() {
-            self.app.handle_shell_event(event);
+        while let Ok(event) = self.sessions[self.focused].shell_rx.try_recv() {
+            self.sessions[self.focused].app.handle_shell_event(event);
         }
 
         let mut had_agent_msg = false;
         loop {
-            match self.handles.agent_rx.try_recv() {
+            match self.sessions[self.focused].handles.agent_rx.try_recv() {
                 Ok(envelope) => {
                     had_agent_msg = true;
-                    let actions = self.app.update(Msg::Agent(Box::new(envelope)));
+                    let actions = self.sessions[self.focused].app.update(Msg::Agent(Box::new(envelope)));
                     self.dispatch(actions);
                 }
-                Err(flume::TryRecvError::Disconnected) if self.app.status == Status::Streaming => {
-                    self.app.status = Status::error("agent stopped unexpectedly".into());
+                Err(flume::TryRecvError::Disconnected) if self.sessions[self.focused].app.status == Status::Streaming => {
+                    self.sessions[self.focused].app.status = Status::error("agent stopped unexpectedly".into());
                     break;
                 }
                 Err(_) => break,
@@ -323,25 +335,25 @@ impl<'t> EventLoop<'t> {
         }
 
         while let Ok(warning) = self.warn_rx.try_recv() {
-            self.app.flash(warning);
+            self.sessions[self.focused].app.flash(warning);
         }
 
         let slot_model = self.model_slot.load();
-        if slot_model.model.context_window != self.app.state.model.context_window {
-            self.app.update_model(&slot_model.model);
+        if slot_model.model.context_window != self.sessions[self.focused].app.state.model.context_window {
+            self.sessions[self.focused].app.update_model(&slot_model.model);
         }
 
         if let Some(rx) = &self.ui_action_rx {
             while let Ok(action) = rx.try_recv() {
                 match action {
                     UiAction::Flash(msg) => {
-                        self.app.flash(msg);
+                        self.sessions[self.focused].app.flash(msg);
                     }
                     UiAction::OpenEditor { path, reply_tx } => {
                         let code = match crate::terminal::open_in_editor(&path, self.terminal) {
                             Ok(code) => code,
                             Err(e) => {
-                                self.app.flash(e);
+                                self.sessions[self.focused].app.flash(e);
                                 -1
                             }
                         };
@@ -354,11 +366,11 @@ impl<'t> EventLoop<'t> {
                         event_tx,
                         cmd_rx,
                     } => {
-                        self.app
+                        self.sessions[self.focused].app
                             .float_mgr
                             .open(buf, config, focus, event_tx, cmd_rx);
                         if focus {
-                            self.app
+                            self.sessions[self.focused].app
                                 .transition_plan(crate::app::mode::PlanTrigger::InteractivePrompt);
                         }
                     }
@@ -373,7 +385,7 @@ impl<'t> EventLoop<'t> {
         let has_pending_ui_action = self.ui_action_rx.as_ref().is_some_and(|rx| !rx.is_empty());
         let poll_duration = if had_agent_msg || has_pending_ui_action {
             Duration::ZERO
-        } else if self.app.is_animating() {
+        } else if self.sessions[self.focused].app.is_animating() {
             Duration::from_millis(ANIMATION_INTERVAL_MS)
         } else {
             Duration::from_millis(IDLE_POLL_INTERVAL_MS)
@@ -384,7 +396,7 @@ impl<'t> EventLoop<'t> {
         }
 
         if let Some(msg) = self.translate_input()? {
-            let actions = self.app.update(msg);
+            let actions = self.sessions[self.focused].app.update(msg);
             self.dispatch(actions);
         }
         Ok(())
@@ -407,11 +419,11 @@ impl<'t> EventLoop<'t> {
                 let (scroll, extra) = aggregate_scroll(
                     mouse.column,
                     mouse.row,
-                    scroll_delta(mouse.kind, self.app.ui_config.mouse_scroll_lines),
-                    self.app.ui_config.mouse_scroll_lines,
+                    scroll_delta(mouse.kind, self.sessions[self.focused].app.ui_config.mouse_scroll_lines),
+                    self.sessions[self.focused].app.ui_config.mouse_scroll_lines,
                 );
                 if let Some(extra) = extra {
-                    let actions = self.app.update(scroll);
+                    let actions = self.sessions[self.focused].app.update(scroll);
                     self.dispatch(actions);
                     Some(extra)
                 } else {
@@ -420,7 +432,7 @@ impl<'t> EventLoop<'t> {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 let (drag, extra) = coalesce_drag(mouse);
-                let actions = self.app.update(Msg::Mouse(drag));
+                let actions = self.sessions[self.focused].app.update(Msg::Mouse(drag));
                 self.dispatch(actions);
                 extra
             }
@@ -435,14 +447,19 @@ impl<'t> EventLoop<'t> {
     }
 
     fn respawn_agent(&mut self, history: Vec<Message>) {
-        let lua_handle = self.app.lua_event_handle.clone();
-        self.handles.respawn(
+        let model_slot = Arc::clone(&self.model_slot);
+        let permissions = Arc::clone(&self.permissions);
+        let config = self.config.clone();
+        let rt = &mut self.sessions[self.focused];
+        let lua_handle = rt.app.lua_event_handle.clone();
+        let tool_output_lines = rt.app.ui_config.tool_output_lines;
+        rt.handles.respawn(
             history,
-            &self.model_slot,
-            self.config.clone(),
-            self.app.ui_config.tool_output_lines,
-            &self.permissions,
-            &mut self.app,
+            &model_slot,
+            config,
+            tool_output_lines,
+            &permissions,
+            &mut rt.app,
             lua_handle,
         );
     }
@@ -451,9 +468,9 @@ impl<'t> EventLoop<'t> {
         match action {
             Action::SendMessage(input) => {
                 let mut input = *input;
-                input.preamble = self.app.shell.drain_results();
-                let run_id = self.app.run_id;
-                self.handles.queue.push(QueueItem::Message {
+                input.preamble = self.sessions[self.focused].app.shell.drain_results();
+                let run_id = self.sessions[self.focused].app.run_id;
+                self.sessions[self.focused].handles.queue.push(QueueItem::Message {
                     text: input.message.clone(),
                     image_count: input.images.len(),
                     input,
@@ -462,14 +479,12 @@ impl<'t> EventLoop<'t> {
                 });
             }
             Action::CancelAgent { run_id } => {
-                let _ = self
-                    .handles
+                let _ = self.sessions[self.focused].handles
                     .cmd_tx
                     .try_send(AgentCommand::Cancel { run_id });
             }
             Action::CancelSubagent { tool_use_id } => {
-                let _ = self
-                    .handles
+                let _ = self.sessions[self.focused].handles
                     .cmd_tx
                     .try_send(AgentCommand::CancelSubagent { tool_use_id });
             }
@@ -482,15 +497,14 @@ impl<'t> EventLoop<'t> {
                     && let Ok(mut new_model) = Model::from_spec(&loaded.model_spec)
                     && let Ok(new_provider) = from_model(&mut new_model, self.timeouts)
                 {
-                    self.app.usage_slot.store(None);
+                    self.sessions[self.focused].app.usage_slot.store(None);
                     self.model_slot.store(Arc::new(ModelSlot {
                         model: new_model,
                         provider: Arc::from(new_provider),
                     }));
                 }
                 self.respawn_agent(loaded.messages);
-                *self
-                    .handles
+                *self.sessions[self.focused].handles
                     .tool_outputs
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = loaded.tool_outputs;
@@ -498,18 +512,18 @@ impl<'t> EventLoop<'t> {
             Action::ChangeModel(spec) => self.change_model(spec),
             Action::RefreshProvider { slug } => self.refresh_provider(slug),
             Action::AssignTier(spec, tier) => {
-                maki_providers::model_registry::set_and_persist(spec, tier, &self.app.storage);
+                maki_providers::model_registry::set_and_persist(spec, tier, &self.sessions[self.focused].app.storage);
             }
             Action::UnassignTier(spec, tier) => {
-                maki_providers::model_registry::unset_and_persist(&spec, tier, &self.app.storage);
+                maki_providers::model_registry::unset_and_persist(&spec, tier, &self.sessions[self.focused].app.storage);
             }
             Action::Compact => {
-                self.handles.queue.push(QueueItem::Compact {
-                    run_id: self.app.run_id,
+                self.sessions[self.focused].handles.queue.push(QueueItem::Compact {
+                    run_id: self.sessions[self.focused].app.run_id,
                 });
             }
             Action::ToggleMcp(server_name, enabled) => {
-                self.handles.send_mcp(McpCommand::Toggle {
+                self.sessions[self.focused].handles.send_mcp(McpCommand::Toggle {
                     server: server_name,
                     enabled,
                 });
@@ -520,31 +534,31 @@ impl<'t> EventLoop<'t> {
                 visible,
             } => {
                 let (trigger, cancel) = CancelToken::new();
-                self.app.shell.add_trigger(trigger);
+                self.sessions[self.focused].app.shell.add_trigger(trigger);
                 spawn_shell(
                     command,
                     id,
                     visible,
-                    self.shell_tx.clone(),
+                    self.sessions[self.focused].shell_tx.clone(),
                     cancel,
                     self.config.clone(),
                 );
             }
             Action::OpenEditor(path) => {
                 if let Err(e) = terminal::open_in_editor(&path, self.terminal) {
-                    self.app.flash(e);
+                    self.sessions[self.focused].app.flash(e);
                 }
             }
             Action::EditInputInEditor => {
-                let current_text = self.app.input_box.buffer.value();
+                let current_text = self.sessions[self.focused].app.input_box.buffer.value();
                 match terminal::edit_temp_content(&current_text, self.terminal) {
-                    Ok(edited) => self.app.input_box.set_input(edited),
-                    Err(e) => self.app.flash(e),
+                    Ok(edited) => self.sessions[self.focused].app.input_box.set_input(edited),
+                    Err(e) => self.sessions[self.focused].app.flash(e),
                 }
             }
             Action::Btw(question) => {
                 let slot = self.model_slot.load();
-                self.app
+                self.sessions[self.focused].app
                     .start_btw(question, Arc::clone(&slot.provider), slot.model.clone());
             }
             Action::Suspend => terminal::suspend(self.terminal),
@@ -558,17 +572,17 @@ impl<'t> EventLoop<'t> {
         match Model::from_spec(&spec) {
             Ok(mut new_model) => match from_model(&mut new_model, self.timeouts) {
                 Ok(new_provider) => {
-                    self.app.update_model(&new_model);
-                    self.app.record_recent_model(&spec);
-                    self.app.usage_slot.store(None);
+                    self.sessions[self.focused].app.update_model(&new_model);
+                    self.sessions[self.focused].app.record_recent_model(&spec);
+                    self.sessions[self.focused].app.usage_slot.store(None);
                     self.model_slot.store(Arc::new(ModelSlot {
                         model: new_model,
                         provider: Arc::from(new_provider),
                     }));
                 }
-                Err(e) => self.app.flash(format!("Failed to create provider: {e}")),
+                Err(e) => self.sessions[self.focused].app.flash(format!("Failed to create provider: {e}")),
             },
-            Err(e) => self.app.flash(format!("Invalid model: {e}")),
+            Err(e) => self.sessions[self.focused].app.flash(format!("Invalid model: {e}")),
         }
     }
 
@@ -584,7 +598,7 @@ impl<'t> EventLoop<'t> {
 
     fn refresh_usage(&self) {
         let provider = Arc::clone(&self.model_slot.load().provider);
-        let slot = Arc::clone(&self.app.usage_slot);
+        let slot = Arc::clone(&self.sessions[self.focused].app.usage_slot);
         slot.store(Some(Arc::new(UsageFetchState::Loading)));
         smol::spawn(async move {
             let state = match provider.fetch_usage().await {
@@ -604,7 +618,7 @@ impl<'t> EventLoop<'t> {
         if current_model.provider.to_string() == slug {
             let mut m = current_model.clone();
             if let Ok(provider) = maki_providers::provider::from_model(&mut m, self.timeouts) {
-                self.app.usage_slot.store(None);
+                self.sessions[self.focused].app.usage_slot.store(None);
                 self.model_slot.store(Arc::new(ModelSlot {
                     model: m,
                     provider: Arc::from(provider),
@@ -617,16 +631,24 @@ impl<'t> EventLoop<'t> {
     }
 
     fn shutdown(mut self) -> (Option<String>, i32) {
-        let exit_code = self.app.exit_request.code();
-        let session_id = self
+        let focused = self.focused;
+        let exit_code = self.sessions[focused].app.exit_request.code();
+        let session_id = self.sessions[focused]
             .app
             .has_content()
-            .then(|| self.app.state.session.id.clone());
-        maki_agent::mcp::kill_process_groups(&self.handles.mcp_reader().load().pids);
-        self.app.cmd_tx = None;
-        self.app.answer_tx = None;
-        drop(self.app);
-        self.handles.shutdown(Duration::from_secs(3));
+            .then(|| self.sessions[focused].app.state.session.id.clone());
+
+        for rt in self.sessions.drain(..) {
+            let SessionRuntime {
+                mut app, handles, ..
+            } = rt;
+            maki_agent::mcp::kill_process_groups(&handles.mcp_reader().load().pids);
+            app.cmd_tx = None;
+            app.answer_tx = None;
+            drop(app);
+            handles.shutdown(Duration::from_secs(3));
+        }
+
         match Arc::try_unwrap(self.storage_writer) {
             Ok(writer) => writer.shutdown(Duration::from_secs(3)),
             Err(_) => {
