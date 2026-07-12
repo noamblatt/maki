@@ -260,7 +260,7 @@ impl SessionDashboard {
     }
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        const TASK_BOX_HEIGHT: u16 = 3;
+        const TASK_BOX_HEIGHT: u16 = 2;
 
         // Reserve a strip at the bottom for the "new task" prompt, letting the
         // picker modal center itself in the remaining space above it.
@@ -285,11 +285,15 @@ impl SessionDashboard {
     }
 
     fn render_task_box(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::widgets::{Block, Borders};
+        use ratatui::widgets::{Block, BorderType, Borders};
 
         let theme = crate::theme::current();
+        // A single titled top rule separates the input from the list above;
+        // no side or bottom borders, so it reads as a clean input line rather
+        // than a boxed panel (avoids the stacked double-line a full box gave).
         let block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP)
+            .border_type(BorderType::Plain)
             .border_style(theme.input_border)
             .title(Span::styled(TASK_BOX_TITLE, theme.panel_title));
         let inner = block.inner(area);

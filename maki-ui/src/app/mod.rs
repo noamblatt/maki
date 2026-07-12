@@ -814,15 +814,12 @@ impl App {
 
         let streaming = self.status == Status::Streaming;
 
-        // Arrow keys navigate between sessions only when the input box is empty;
-        // otherwise they move the text cursor as usual. Left returns to the
-        // agents dashboard; Up/Down cycle to the previous/next session
-        // (Claude Code parity).
-        if self.is_main_chat()
-            && self.input_box.is_empty()
-            && !streaming
-            && key.modifiers.is_empty()
-        {
+        // Arrow keys navigate between sessions whenever the input box is empty,
+        // even while the current session is still streaming (its agent keeps
+        // running in the background). When the input has text, arrows move the
+        // cursor as usual. Left returns to the agents dashboard; Up/Down cycle
+        // to the previous/next session (Claude Code parity).
+        if self.is_main_chat() && self.input_box.is_empty() && key.modifiers.is_empty() {
             match key.code {
                 KeyCode::Left => {
                     self.open_dashboard();
