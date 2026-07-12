@@ -156,6 +156,29 @@ fn typing_and_submit() {
     assert_eq!(app.main_chat().last_message_text(), "hi");
 }
 
+#[test]
+fn submit_marks_session_working_then_completed() {
+    use maki_storage::sessions::SessionStatus;
+
+    let mut app = test_app();
+    app.update(Msg::Key(key(KeyCode::Char('h'))));
+    app.update(Msg::Key(key(KeyCode::Char('i'))));
+    app.update(Msg::Key(key(KeyCode::Enter)));
+
+    // Streaming submit persists the session as Working.
+    assert_eq!(app.status, Status::Streaming);
+    assert_eq!(app.state.session.meta.status, SessionStatus::Working);
+
+    // Returning to Idle with content on screen marks it Completed.
+    app.state
+        .session
+        .messages
+        .push(maki_providers::Message::user("hi".into()));
+    app.status = Status::Idle;
+    app.save_session();
+    assert_eq!(app.state.session.meta.status, SessionStatus::Completed);
+}
+
 fn with_text(app: &mut App) {
     app.update(Msg::Key(key(KeyCode::Char('h'))));
     app.update(Msg::Key(key(KeyCode::Char('i'))));

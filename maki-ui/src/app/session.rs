@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicBool;
 use crate::chat::{Chat, DONE_TEXT, history_to_display};
 use crate::components::DisplayRole;
 use crate::components::rewind_picker::RewindEntry;
-use crate::components::{Action, LoadedSession};
+use crate::components::{Action, LoadedSession, Overlay};
 use maki_providers::{Model, TokenUsage};
 use maki_storage::sessions::StoredSubagent;
 
@@ -60,6 +60,23 @@ impl App {
                 model: chat.model_id.clone(),
             })
             .collect();
+
+        self.sync_session_status();
+    }
+
+    /// Derive the persisted dashboard status from the current runtime state so
+    /// `maki agents` can group this session correctly.
+    fn sync_session_status(&mut self) {
+        use super::Status;
+        use maki_storage::sessions::SessionStatus;
+
+        self.state.session.meta.status = match self.status {
+            Status::Streaming => SessionStatus::Working,
+            Status::Error { .. } => SessionStatus::Error,
+            Status::Idle if self.permission_prompt.is_open() => SessionStatus::NeedsInput,
+            Status::Idle if self.has_content() => SessionStatus::Completed,
+            Status::Idle => SessionStatus::Idle,
+        };
     }
 
     pub(super) fn save_input_history(&self) {
