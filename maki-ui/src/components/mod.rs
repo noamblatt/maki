@@ -221,6 +221,16 @@ pub enum Action {
     },
     NewSession,
     LoadSession(Box<LoadedSession>),
+    /// Open a stored session (by id) in the multi-session dashboard: focus its
+    /// live runtime if one exists, otherwise attach it as a new background
+    /// runtime and focus it. Unlike `LoadSession`, this does not replace the
+    /// currently focused session.
+    FocusSession(String),
+    /// Create a brand-new background session, optionally seeded with an initial
+    /// task prompt, and focus it. Used by the dashboard's "new session" box.
+    SpawnSession(Option<String>),
+    /// Return focus to the agents dashboard (no session rendered on top).
+    ShowDashboard,
     ChangeModel(String),
     RefreshProvider {
         slug: String,

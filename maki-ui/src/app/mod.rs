@@ -618,7 +618,11 @@ impl App {
                 DashboardAction::None => vec![],
                 DashboardAction::Open(id) => {
                     self.session_dashboard.close();
-                    self.load_session(id)
+                    vec![Action::FocusSession(id)]
+                }
+                DashboardAction::NewSession => {
+                    self.session_dashboard.close();
+                    vec![Action::SpawnSession(None)]
                 }
                 DashboardAction::ConfirmDelete => {
                     self.status_bar.flash(format!(

@@ -16,6 +16,7 @@ const NO_SESSIONS_MSG: &str = "No sessions yet in this directory";
 const FOOTER_HINTS: &[(&str, &str)] = &[
     ("↑/↓", "navigate"),
     ("→/Enter", "open"),
+    ("Ctrl-N", "new"),
     (key::TASKS.label, "delete"),
 ];
 
@@ -26,6 +27,7 @@ const SECTION_COMPLETED: &str = "Completed";
 pub enum DashboardAction {
     Consumed,
     Open(String),
+    NewSession,
     ConfirmDelete,
     Delete(String),
     None,
@@ -147,6 +149,14 @@ impl SessionDashboard {
     pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
         if is_delete_key(&key) {
             return self.handle_delete_key();
+        }
+
+        // Ctrl-N spawns a brand-new session.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && key.code == KeyCode::Char('n')
+        {
+            return DashboardAction::NewSession;
         }
 
         // Right arrow opens the highlighted session (Claude Code parity).

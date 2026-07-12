@@ -9,6 +9,7 @@ use crossterm::event::{
     self, Event, KeyEventKind, MouseButton, MouseEvent as CtMouseEvent, MouseEventKind,
 };
 use maki_agent::command::CustomCommand;
+use std::path::PathBuf;
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{AgentConfig, CancelToken, McpCommand};
 use maki_config::UiConfig;
@@ -78,7 +79,23 @@ pub(crate) struct EventLoop<'t> {
     storage_writer: Arc<StorageWriter>,
     timeouts: Timeouts,
     ui_action_rx: Option<flume::Receiver<UiAction>>,
+    spawn_ctx: SpawnContext,
     _model_fetch_task: smol::Task<()>,
+}
+
+/// Cloneable inputs needed to build additional `SessionRuntime`s at runtime
+/// (e.g. when the dashboard spawns or opens a session). All fields are cheap
+/// Arc-backed handles or shared config.
+struct SpawnContext {
+    storage: StateDir,
+    ui_config: UiConfig,
+    input_history_size: usize,
+    lua_command_reader: LuaCommandReader,
+    keymap_reader: KeymapReader,
+    hint_reader: HintReader,
+    lua_event_handle: Option<EventHandle>,
+    custom_commands: Arc<[CustomCommand]>,
+    cwd: PathBuf,
 }
 
 struct BackgroundModels {
@@ -215,13 +232,24 @@ impl<'t> EventLoop<'t> {
             config.clone(),
             ui_config.tool_output_lines,
             &permissions,
-            cwd,
+            cwd.clone(),
             Some(session.id.clone()),
             timeouts,
             lua_event_handle.clone(),
         );
 
         let custom_commands: Arc<[CustomCommand]> = Arc::from(commands);
+        let spawn_ctx = SpawnContext {
+            storage: storage.clone(),
+            ui_config,
+            input_history_size,
+            lua_command_reader: lua_command_reader.clone(),
+            keymap_reader: keymap_reader.clone(),
+            hint_reader: hint_reader.clone(),
+            lua_event_handle: lua_event_handle.clone(),
+            custom_commands: Arc::clone(&custom_commands),
+            cwd,
+        };
         let mut app = App::new(
             &model,
             session,
@@ -277,6 +305,7 @@ impl<'t> EventLoop<'t> {
             storage_writer,
             timeouts,
             ui_action_rx,
+            spawn_ctx,
             _model_fetch_task: bg.task,
         })
     }
@@ -465,6 +494,112 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    /// Build a fresh background `SessionRuntime` for the given stored session,
+    /// sharing the process-wide resources captured in `spawn_ctx`.
+    fn build_runtime(&self, session: AppSession, initial_history: Vec<Message>) -> SessionRuntime {
+        let ctx = &self.spawn_ctx;
+        let (shell_tx, shell_rx) = flume::unbounded::<ShellEvent>();
+        let model = self.model_slot.load().model.clone();
+
+        let handles = AgentHandles::spawn(
+            &self.model_slot,
+            initial_history,
+            self.config.clone(),
+            ctx.ui_config.tool_output_lines,
+            &self.permissions,
+            ctx.cwd.clone(),
+            Some(session.id.clone()),
+            self.timeouts,
+            ctx.lua_event_handle.clone(),
+        );
+
+        let mut app = App::new(
+            &model,
+            session,
+            ctx.storage.clone(),
+            Arc::clone(&self.available_models),
+            handles.mcp_reader(),
+            handles.mcp_config_errors.clone(),
+            ctx.lua_command_reader.clone(),
+            ctx.keymap_reader.clone(),
+            ctx.hint_reader.clone(),
+            Arc::clone(&self.storage_writer),
+            ctx.ui_config,
+            ctx.input_history_size,
+            Arc::clone(&self.permissions),
+            Arc::clone(&ctx.custom_commands),
+        );
+        app.lua_event_handle = ctx.lua_event_handle.clone();
+        handles.apply_to_app(&mut app);
+        if !handles.mcp_config_errors.is_empty() {
+            app.flash(format!("MCP config error: {}", handles.mcp_config_errors));
+        }
+
+        SessionRuntime {
+            app,
+            handles,
+            shell_tx,
+            shell_rx,
+        }
+    }
+
+    /// Focus an existing runtime by session id, or attach the stored session as
+    /// a new background runtime and focus it. Does not disturb other sessions.
+    fn focus_session(&mut self, id: String) {
+        if let Some(pos) = self
+            .sessions
+            .iter()
+            .position(|rt| rt.app.state.session.id == id)
+        {
+            self.focused = pos;
+            return;
+        }
+
+        let session = match AppSession::load(&id, &self.spawn_ctx.storage) {
+            Ok(s) => s,
+            Err(e) => {
+                self.sessions[self.focused]
+                    .app
+                    .flash(format!("Failed to load session: {e}"));
+                return;
+            }
+        };
+        let history = session.messages.clone();
+        let mut rt = self.build_runtime(session, history.clone());
+        if !history.is_empty() {
+            restore_session(&mut rt.app, &rt.handles);
+        }
+        self.sessions.push(rt);
+        self.focused = self.sessions.len() - 1;
+    }
+
+    /// Create a brand-new background session, optionally seeded with a task
+    /// prompt, and focus it.
+    fn spawn_session(&mut self, prompt: Option<String>) {
+        let cwd = self.spawn_ctx.cwd.to_string_lossy().into_owned();
+        let model_spec = self.model_slot.load().model.spec();
+        let mut session = AppSession::new(&model_spec, &cwd);
+        if let Err(e) = session.save(&self.spawn_ctx.storage) {
+            self.sessions[self.focused]
+                .app
+                .flash(format!("Failed to create session: {e}"));
+            return;
+        }
+        let rt = self.build_runtime(session, Vec::new());
+        self.sessions.push(rt);
+        self.focused = self.sessions.len() - 1;
+
+        if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
+            let sub = Submission {
+                text: prompt,
+                images: Vec::new(),
+            };
+            let idx = self.focused;
+            let actions = self.sessions[idx].app.handle_submit(sub);
+            self.dispatch(idx, actions);
+        }
+    }
+
     fn respawn_agent(&mut self, idx: usize, history: Vec<Message>) {
         let model_slot = Arc::clone(&self.model_slot);
         let permissions = Arc::clone(&self.permissions);
@@ -585,6 +720,11 @@ impl<'t> EventLoop<'t> {
                     Arc::clone(&slot.provider),
                     slot.model.clone(),
                 );
+            }
+            Action::FocusSession(id) => self.focus_session(id),
+            Action::SpawnSession(prompt) => self.spawn_session(prompt),
+            Action::ShowDashboard => {
+                self.sessions[idx].app.open_dashboard();
             }
             Action::Suspend => terminal::suspend(self.terminal),
             Action::RefreshModels => self.refresh_models(),
