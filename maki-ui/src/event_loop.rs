@@ -587,7 +587,7 @@ impl<'t> EventLoop<'t> {
 
     /// Create a brand-new background session, optionally seeded with a task
     /// prompt, and focus it.
-    fn spawn_session(&mut self, prompt: Option<String>) {
+    fn spawn_session(&mut self, submission: Option<Box<Submission>>) {
         let cwd = self.spawn_ctx.cwd.to_string_lossy().into_owned();
         let model_spec = self.model_slot.load().model.spec();
         let mut session = AppSession::new(&model_spec, &cwd);
@@ -601,14 +601,13 @@ impl<'t> EventLoop<'t> {
         self.sessions.push(rt);
         self.focused = self.sessions.len() - 1;
 
-        if let Some(prompt) = prompt.filter(|p| !p.trim().is_empty()) {
-            let sub = Submission {
-                text: prompt,
-                images: Vec::new(),
-            };
-            let idx = self.focused;
-            let actions = self.sessions[idx].app.handle_submit(sub);
-            self.dispatch(idx, actions);
+        if let Some(sub) = submission {
+            let sub = *sub;
+            if !sub.is_empty() {
+                let idx = self.focused;
+                let actions = self.sessions[idx].app.handle_submit(sub);
+                self.dispatch(idx, actions);
+            }
         }
     }
 

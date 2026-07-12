@@ -977,7 +977,7 @@ impl App {
                     return vec![];
                 }
                 self.session_dashboard.close();
-                vec![Action::SpawnSession(Some(sub.text))]
+                vec![Action::SpawnSession(Some(Box::new(sub)))]
             }
             InputAction::PaletteSync(val) => {
                 self.command_palette.sync(&val);

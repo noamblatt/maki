@@ -10,7 +10,6 @@ use maki_storage::StateDir;
 use maki_storage::sessions::SessionStatus;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::text::Span;
 
 const TITLE: &str = " Agents ";
 const NO_SESSIONS_MSG: &str = "No sessions yet in this directory";
@@ -29,7 +28,6 @@ const SECTION_COMPLETED: &str = "Completed";
 /// second keeps background status changes visible without hammering storage.
 const REFRESH_INTERVAL_TICKS: u16 = 60;
 
-const TASK_BOX_TITLE: &str = " New session ";
 
 #[derive(Debug)]
 pub enum DashboardAction {
@@ -237,37 +235,24 @@ impl SessionDashboard {
         }
     }
 
-    /// Renders the session list and the titled "New session" separator, and
-    /// returns the single-row `Rect` where the caller should render the input
-    /// line (inside the same panel column, right under the list).
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> DashboardLayout {
-        use ratatui::widgets::{Block, BorderType, Borders};
-
-        // One titled separator row + one input row = a clean single-line prompt.
+    /// Renders the session list and reserves the bottom of the panel for the
+    /// shared new-session input box. Returns the `Rect` the caller renders the
+    /// real input box into (so it gets horizontal scroll, multiline, cursor,
+    /// and image display for free).
+    pub fn view(&mut self, frame: &mut Frame, area: Rect, input_height: u16) -> DashboardLayout {
+        // The input box draws its own top+bottom border, so it needs at least 3
+        // rows (border, one content line, border). Give it what the caller asks.
+        let reserved = input_height.max(3);
         let [list_area, bottom] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(2)]).areas(area);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(reserved)]).areas(area);
 
         let popup = self.picker.view(frame, list_area);
 
-        let theme = crate::theme::current();
-        let sep_area = Rect {
+        let input_area = Rect {
             x: popup.x,
             y: bottom.y,
             width: popup.width.max(1),
-            height: 1,
-        };
-        let block = Block::default()
-            .borders(Borders::TOP)
-            .border_type(BorderType::Plain)
-            .border_style(theme.input_border)
-            .title(Span::styled(TASK_BOX_TITLE, theme.panel_title));
-        frame.render_widget(block, sep_area);
-
-        let input_area = Rect {
-            x: popup.x + 1,
-            y: bottom.y + 1,
-            width: popup.width.saturating_sub(2).max(1),
-            height: 1,
+            height: reserved.min(bottom.height),
         };
 
         DashboardLayout { popup, input_area }
@@ -275,8 +260,7 @@ impl SessionDashboard {
 }
 
 /// Where the dashboard drew itself: `popup` is the modal rect (for overlay
-/// bookkeeping), `input_area` is the single row where the caller renders the
-/// new-session input line.
+/// bookkeeping), `input_area` is where the caller renders the shared input box.
 pub struct DashboardLayout {
     pub popup: Rect,
     pub input_area: Rect,

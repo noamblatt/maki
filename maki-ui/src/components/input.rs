@@ -251,10 +251,6 @@ impl InputBox {
         self.pending_images.push(source);
     }
 
-    pub fn pending_image_count(&self) -> usize {
-        self.pending_images.len()
-    }
-
     pub fn set_input(&mut self, s: String) {
         self.buffer = TextBuffer::new(s);
     }

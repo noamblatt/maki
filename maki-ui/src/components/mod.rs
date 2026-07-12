@@ -227,8 +227,9 @@ pub enum Action {
     /// currently focused session.
     FocusSession(String),
     /// Create a brand-new background session, optionally seeded with an initial
-    /// task prompt, and focus it. Used by the dashboard's "new session" box.
-    SpawnSession(Option<String>),
+    /// task submission (text + attached images), and focus it. Used by the
+    /// dashboard's "new session" box.
+    SpawnSession(Option<Box<crate::components::input::Submission>>),
     /// Return focus to the agents dashboard (no session rendered on top).
     ShowDashboard,
     /// Move focus to the previous / next background session in the dashboard's

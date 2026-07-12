@@ -17,8 +17,6 @@ use ratatui::widgets::{Block, Borders, Widget};
 
 use super::{App, Mode, Status};
 
-const DASHBOARD_INPUT_PLACEHOLDER: &str = "Describe a task for a new session";
-
 struct ViewLayout {
     msg_area: Rect,
     bottom_area: Rect,
@@ -221,40 +219,6 @@ impl App {
 
     /// Single-line new-session prompt for the dashboard, backed by the shared
     /// input box state (so `/` commands, file picker, and image paste all work).
-    fn render_dashboard_input(&mut self, frame: &mut Frame, area: Rect) {
-        use ratatui::widgets::Paragraph;
-
-        let theme = crate::theme::current();
-        let text = self.input_box.buffer.value();
-        let images = self.input_box.pending_image_count();
-
-        let line = if text.is_empty() && images == 0 {
-            Line::from(vec![
-                crate::components::chevron_span(),
-                Span::styled(DASHBOARD_INPUT_PLACEHOLDER, theme.input_placeholder),
-            ])
-        } else {
-            let cursor_x = self.input_box.buffer.x();
-            let chars: Vec<char> = text.chars().collect();
-            let before: String = chars[..cursor_x.min(chars.len())].iter().collect();
-            let cursor_char = chars.get(cursor_x).copied().unwrap_or(' ');
-            let after_start = cursor_x.saturating_add(1).min(chars.len());
-            let after: String = chars[after_start..].iter().collect();
-            let mut spans = vec![crate::components::chevron_span()];
-            if images > 0 {
-                spans.push(Span::styled(format!("[{images} image] "), theme.tool_dim));
-            }
-            spans.push(Span::raw(before));
-            spans.push(Span::styled(cursor_char.to_string(), theme.cursor));
-            spans.push(Span::raw(after));
-            Line::from(spans)
-        };
-        frame.render_widget(Paragraph::new(vec![line]), area);
-
-        // Command palette floats above the input line when the user types `/`.
-        self.command_palette.view(frame, area);
-    }
-
     fn render_splits(&mut self, frame: &mut Frame, layout: &ViewLayout) {
         for dir in Split::ALL {
             if let Some(rect) = layout.splits.rect(dir) {
@@ -284,9 +248,39 @@ impl App {
 
         if self.session_dashboard.is_open() {
             self.session_dashboard.tick();
-            let dash = self.session_dashboard.view(frame, full);
+            let max_input = (full.height / 2).max(3);
+            let input_height = self
+                .input_box
+                .height(full.width.saturating_sub(2))
+                .clamp(3, max_input);
+            let dash = self.session_dashboard.view(frame, full, input_height);
             overlay_rect = dash.popup;
-            self.render_dashboard_input(frame, dash.input_area);
+
+            // Render maki's real input box inside the panel: full editing,
+            // horizontal scroll, multiline, image display.
+            self.input_box.view(
+                frame,
+                dash.input_area,
+                false,
+                self.separator_style(),
+                true,
+                None,
+            );
+            // Left-aligned "New session" label on the input's top border row.
+            let label_area = Rect {
+                x: dash.input_area.x + 1,
+                y: dash.input_area.y,
+                width: dash.input_area.width.saturating_sub(2),
+                height: 1,
+            };
+            frame.render_widget(
+                ratatui::widgets::Paragraph::new(Line::from(Span::styled(
+                    " New session ",
+                    crate::theme::current().panel_title,
+                ))),
+                label_area,
+            );
+            self.command_palette.view(frame, dash.input_area);
             if let Some(flash) = self.session_dashboard.take_flash() {
                 self.status_bar.flash(flash);
             }
