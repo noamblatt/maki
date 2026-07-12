@@ -275,3 +275,29 @@ cargo build -p maki-storage
 cargo clippy --all --tests -- -D warnings
 cargo nextest run -p maki-storage
 ```
+
+---
+
+## F. Refinement after reading the UI code (Step 3 approach)
+
+Key discovery: `components/list_picker.rs` `PickerItem` already exposes `section(&self) ->
+Option<&str>`, and `ListPicker` renders section headers natively. So the dashboard does NOT
+need a bespoke grouped renderer:
+
+- Build `SessionDashboard` wrapping a `ListPicker<DashboardEntry>` (mirrors the proven
+  `session_picker.rs` structure: async load via thread + flume, `tick()`/`try_resolve`,
+  delete-confirm, `handle_key`).
+- Each `DashboardEntry::section()` returns the status group label ("Needs input" / "Working" /
+  "Completed"), so grouping + headers come for free. Entries are pre-sorted by status priority
+  then recency before being handed to the picker.
+- `detail()` = relative time (+ optional summary); reuse `format_relative_time`/`humanize_secs`
+  (promoted out of `session_picker.rs` into `components/mod.rs` for sharing).
+- Difference from `session_picker`: rendered as a full-screen view (own branch in
+  `app/view.rs`) rather than an `Overlay`, and it is the landing screen when `app.dashboard`.
+
+This keeps Step 3 small and consistent with maki's patterns instead of reinventing list UI.
+
+### Environment note (resolved)
+Rust toolchain now installed (rustup, stable 1.97.0 aarch64). Build/test/clippy all run
+locally. Steps 1-2 are compiler-verified: `cargo build` (workspace) OK, `cargo test -p
+maki-storage` 47 passed, `cargo clippy --all --tests` clean.

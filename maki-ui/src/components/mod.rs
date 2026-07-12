@@ -19,6 +19,7 @@ pub mod queue_panel;
 pub(crate) mod rewind_picker;
 pub(crate) mod scrollbar;
 pub(crate) mod search_modal;
+pub(crate) mod session_dashboard;
 pub(crate) mod session_picker;
 pub(crate) mod split_layout;
 pub mod status_bar;
@@ -85,6 +86,32 @@ pub(crate) fn apply_scroll_delta(offset: u16, delta: i32) -> u16 {
 
 pub fn is_ctrl(key: &KeyEvent) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT)
+}
+
+pub(crate) fn format_relative_time(epoch_secs: u64) -> String {
+    let ts = jiff::Timestamp::from_second(epoch_secs as i64).unwrap_or(jiff::Timestamp::UNIX_EPOCH);
+    let now = jiff::Timestamp::now();
+    let secs = now.as_second().saturating_sub(ts.as_second()).max(0) as u64;
+    humanize_secs(secs)
+}
+
+fn humanize_secs(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 3600;
+    const DAY: u64 = 86400;
+    const WEEK: u64 = 604800;
+    const MONTH: u64 = 2592000;
+    const YEAR: u64 = 31536000;
+
+    match secs {
+        0..MINUTE => "just now".into(),
+        MINUTE..HOUR => format!("{}m ago", secs / MINUTE),
+        HOUR..DAY => format!("{}h ago", secs / HOUR),
+        DAY..WEEK => format!("{}d ago", secs / DAY),
+        WEEK..MONTH => format!("{}w ago", secs / WEEK),
+        MONTH..YEAR => format!("{}mo ago", secs / MONTH),
+        _ => format!("{}y ago", secs / YEAR),
+    }
 }
 
 pub(crate) struct ModalScroll {
@@ -460,5 +487,16 @@ mod tests {
     #[test_case(0, 5, 0    ; "clamp_underflow")]
     fn apply_scroll_delta_cases(offset: u16, delta: i32, expected: u16) {
         assert_eq!(apply_scroll_delta(offset, delta), expected);
+    }
+
+    #[test_case(0, "just now" ; "below_minute")]
+    #[test_case(60, "1m ago" ; "minute_boundary")]
+    #[test_case(3600, "1h ago" ; "hour_boundary")]
+    #[test_case(86400, "1d ago" ; "day_boundary")]
+    #[test_case(604800, "1w ago" ; "week_boundary")]
+    #[test_case(2592000, "1mo ago" ; "month_boundary")]
+    #[test_case(31536000, "1y ago" ; "year_boundary")]
+    fn relative_time_formatting(secs: u64, expected: &str) {
+        assert_eq!(humanize_secs(secs), expected);
     }
 }
