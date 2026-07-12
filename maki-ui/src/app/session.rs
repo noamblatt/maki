@@ -244,6 +244,21 @@ impl App {
         vec![]
     }
 
+    /// `/rename <title>` - set the current session's title and persist it.
+    pub(super) fn rename_current_session(&mut self, args: &str) -> Vec<Action> {
+        let title = args.trim();
+        if title.is_empty() {
+            self.flash("Usage: /rename <new title>".into());
+            return vec![];
+        }
+        const MAX_TITLE_LEN: usize = 100;
+        let title: String = title.chars().take(MAX_TITLE_LEN).collect();
+        self.state.session.title = title.clone();
+        self.save_session();
+        self.flash(format!("Renamed to \"{title}\""));
+        vec![]
+    }
+
     pub(crate) fn open_dashboard(&mut self) {
         self.session_dashboard
             .open(&self.state.session.cwd, &self.storage);
