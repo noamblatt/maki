@@ -268,7 +268,12 @@ impl App {
                 true,
                 None,
             );
-            // Left-aligned "New session" label on the input's top border row.
+            // Left-aligned label on the input's top border row.
+            let label = if self.session_dashboard.is_renaming() {
+                " Rename session "
+            } else {
+                " New session "
+            };
             let label_area = Rect {
                 x: dash.input_area.x + 1,
                 y: dash.input_area.y,
@@ -277,7 +282,7 @@ impl App {
             };
             frame.render_widget(
                 ratatui::widgets::Paragraph::new(Line::from(Span::styled(
-                    " New session ",
+                    label,
                     crate::theme::current().panel_title,
                 ))),
                 label_area,

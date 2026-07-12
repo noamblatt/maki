@@ -232,6 +232,8 @@ pub enum Action {
     SpawnSession(Option<Box<crate::components::input::Submission>>),
     /// Return focus to the agents dashboard (no session rendered on top).
     ShowDashboard,
+    /// Rename a stored session's title: (session id, new title).
+    RenameSession(String, String),
     /// Move focus to the previous / next background session in the dashboard's
     /// ordering. Used by Up/Down inside a session when the input box is empty.
     FocusPrevSession,
