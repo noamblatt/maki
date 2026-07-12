@@ -172,10 +172,6 @@ impl SessionDashboard {
         self.picker.scroll(delta);
     }
 
-    pub fn handle_paste(&mut self, text: &str) -> bool {
-        self.picker.handle_paste(text)
-    }
-
     pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
         if is_delete_key(&key) {
             return self.handle_delete_key();

@@ -325,13 +325,14 @@ impl App {
             Msg::Key(key) => self.handle_key(key),
             Msg::Paste(text) => {
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                let input_active = self.is_main_chat() || self.session_dashboard.is_open();
                 if text.is_empty() {
-                    if self.is_main_chat() && self.image_paste_rx.is_empty() {
+                    if input_active && self.image_paste_rx.is_empty() {
                         self.start_image_paste();
                     }
                 } else {
                     let mut any_image = false;
-                    if self.is_main_chat() {
+                    if input_active {
                         for line in text.lines() {
                             if let Some((path, mt)) = image::try_parse_image_path(line) {
                                 self.start_file_image_paste(path, mt);
@@ -1608,12 +1609,19 @@ impl App {
         try_picker!(self.file_picker);
         try_picker!(self.task_picker);
         try_picker!(self.session_picker);
-        try_picker!(self.session_dashboard);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);
         try_picker!(self.mcp_picker);
         try_picker!(self.login_picker);
+        // When the dashboard is open, pasted text / dropped file paths belong in
+        // the shared new-session input box, not the picker's filter.
+        if self.session_dashboard.is_open() {
+            if let InputAction::PaletteSync(val) = self.input_box.handle_paste(text) {
+                self.command_palette.sync(&val);
+            }
+            return;
+        }
         if !self.is_main_chat() {
             return;
         }
