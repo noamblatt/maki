@@ -631,12 +631,6 @@ impl App {
                     self.input_box.discard();
                     vec![Action::SpawnSession(None)]
                 }
-                DashboardAction::BeginRename(_id, title) => {
-                    self.input_box.discard();
-                    self.input_box.set_input(title);
-                    self.input_box.buffer.move_to_end();
-                    vec![]
-                }
                 DashboardAction::ConfirmDelete => {
                     self.status_bar.flash(format!(
                         "Press {} again to confirm delete",
@@ -975,16 +969,6 @@ impl App {
 
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => {
-                // Renaming an existing session: commit the new title.
-                if let Some(id) = self.session_dashboard.renaming_id().map(str::to_owned) {
-                    self.session_dashboard.cancel_rename();
-                    self.input_box.discard();
-                    let title = sub.text.trim().to_owned();
-                    if title.is_empty() {
-                        return vec![];
-                    }
-                    return vec![Action::RenameSession(id, title)];
-                }
                 if sub.is_empty() {
                     if let Some(id) = self.session_dashboard.selected_id() {
                         self.session_dashboard.close();

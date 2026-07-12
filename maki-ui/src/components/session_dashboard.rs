@@ -17,7 +17,6 @@ const FOOTER_HINTS: &[(&str, &str)] = &[
     ("↑/↓", "navigate"),
     ("→", "open"),
     ("Enter", "open/spawn"),
-    ("r", "rename"),
     (key::DELETE.label, "delete"),
 ];
 
@@ -35,9 +34,6 @@ pub enum DashboardAction {
     Consumed,
     Open(String),
     NewSession,
-    /// Start renaming a session: (id, current title). The caller pre-fills the
-    /// shared input box with the title for editing.
-    BeginRename(String, String),
     ConfirmDelete,
     Delete(String),
     /// Not a dashboard navigation key: the caller should route it to the
@@ -74,7 +70,6 @@ impl PickerItem for DashboardEntry {
 pub struct SessionDashboard {
     picker: ListPicker<DashboardEntry>,
     confirming: Option<(String, u64)>,
-    renaming: Option<String>,
     pending_rx: Option<flume::Receiver<Result<Vec<DashboardEntry>, String>>>,
     flash: Option<String>,
     source: Option<(String, StateDir)>,
@@ -87,7 +82,6 @@ impl SessionDashboard {
         Self {
             picker: ListPicker::new().with_footer(FOOTER_HINTS),
             confirming: None,
-            renaming: None,
             pending_rx: None,
             flash: None,
             source: None,
@@ -162,7 +156,6 @@ impl SessionDashboard {
         self.pending_rx = None;
         self.source = None;
         self.refreshing = false;
-        self.renaming = None;
     }
 
     pub fn remove_entry(&mut self, id: &str) {
@@ -178,17 +171,6 @@ impl SessionDashboard {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
-        // While renaming, the shared input box owns editing. Only Esc cancels;
-        // everything else (including Enter, which the App commits) passes
-        // through so the name can contain any characters.
-        if self.renaming.is_some() {
-            if key.code == KeyCode::Esc {
-                self.renaming = None;
-                return DashboardAction::Consumed;
-            }
-            return DashboardAction::Passthrough(key);
-        }
-
         if is_delete_key(&key) {
             return self.handle_delete_key();
         }
@@ -199,15 +181,6 @@ impl SessionDashboard {
             && key.code == KeyCode::Char('n')
         {
             return DashboardAction::NewSession;
-        }
-
-        // `r` renames the highlighted session (edited via the shared input box).
-        if key.code == KeyCode::Char('r') && key.modifiers.is_empty() {
-            if let Some(item) = self.picker.selected_item() {
-                self.renaming = Some(item.id.clone());
-                return DashboardAction::BeginRename(item.id.clone(), item.title.clone());
-            }
-            return DashboardAction::Consumed;
         }
 
         // Navigation keys drive the session list. Everything else (typing the
@@ -232,19 +205,6 @@ impl SessionDashboard {
 
     pub fn selected_id(&self) -> Option<String> {
         self.picker.selected_item().map(|item| item.id.clone())
-    }
-
-    pub fn is_renaming(&self) -> bool {
-        self.renaming.is_some()
-    }
-
-    /// Session id currently being renamed, if any.
-    pub fn renaming_id(&self) -> Option<&str> {
-        self.renaming.as_deref()
-    }
-
-    pub fn cancel_rename(&mut self) {
-        self.renaming = None;
     }
 
     fn handle_delete_key(&mut self) -> DashboardAction {
@@ -425,31 +385,5 @@ mod tests {
             press(&mut dash, KeyCode::Right),
             DashboardAction::Consumed
         ));
-    }
-
-    #[test]
-    fn rename_mode_passes_keys_through_and_esc_cancels() {
-        let mut dash = SessionDashboard::new();
-        // Force rename mode (no selection needed for the state machine test).
-        dash.renaming = Some("sess-1".into());
-        assert!(dash.is_renaming());
-        assert_eq!(dash.renaming_id(), Some("sess-1"));
-
-        // Typing passes through to the shared input box.
-        assert!(matches!(
-            press(&mut dash, KeyCode::Char('x')),
-            DashboardAction::Passthrough(_)
-        ));
-        // r is not a shortcut while renaming; it types a literal r.
-        assert!(matches!(
-            press(&mut dash, KeyCode::Char('r')),
-            DashboardAction::Passthrough(_)
-        ));
-        // Esc cancels rename.
-        assert!(matches!(
-            press(&mut dash, KeyCode::Esc),
-            DashboardAction::Consumed
-        ));
-        assert!(!dash.is_renaming());
     }
 }

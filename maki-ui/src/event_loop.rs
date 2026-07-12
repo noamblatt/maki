@@ -543,44 +543,6 @@ impl<'t> EventLoop<'t> {
         }
     }
 
-    /// Rename a stored session's title. Updates the on-disk session and any
-    /// live runtime with that id, then refreshes the dashboard listing.
-    fn rename_session(&mut self, ui_idx: usize, id: String, title: String) {
-        let storage = self.spawn_ctx.storage.clone();
-        match AppSession::load(&id, &storage) {
-            Ok(mut session) => {
-                session.title = title.clone();
-                if let Err(e) = session.save(&storage) {
-                    self.sessions[ui_idx]
-                        .app
-                        .flash(format!("Failed to rename session: {e}"));
-                    return;
-                }
-            }
-            Err(e) => {
-                self.sessions[ui_idx]
-                    .app
-                    .flash(format!("Failed to load session: {e}"));
-                return;
-            }
-        }
-
-        // Keep any live runtime's in-memory title in sync.
-        for rt in &mut self.sessions {
-            if rt.app.state.session.id == id {
-                rt.app.state.session.title = title.clone();
-            }
-        }
-
-        self.sessions[ui_idx].app.flash("Session renamed".into());
-        // Reopen the dashboard listing so the new title shows immediately.
-        let cwd = self.spawn_ctx.cwd.to_string_lossy().into_owned();
-        self.sessions[ui_idx]
-            .app
-            .session_dashboard
-            .open(&cwd, &storage);
-    }
-
     /// Move focus to the previous (-1) or next (+1) live session runtime,
     /// wrapping around. No-op when only one session is running.
     fn cycle_focus(&mut self, delta: i32) {
@@ -772,7 +734,6 @@ impl<'t> EventLoop<'t> {
             }
             Action::FocusSession(id) => self.focus_session(id),
             Action::SpawnSession(prompt) => self.spawn_session(prompt),
-            Action::RenameSession(id, title) => self.rename_session(idx, id, title),
             Action::FocusPrevSession => self.cycle_focus(-1),
             Action::FocusNextSession => self.cycle_focus(1),
             Action::ShowDashboard => {
