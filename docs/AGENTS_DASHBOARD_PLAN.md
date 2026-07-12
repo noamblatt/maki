@@ -375,3 +375,44 @@ Nav model on the dashboard now: type = task box; Up/Down = navigate list; Right/
 
 Verified: workspace build + clippy clean, maki-ui 1005 + maki-storage 87 tests pass, both
 `maki` and `maki agents` boot.
+
+---
+
+## J. Post-review polish (after Noam's feedback)
+
+Iterated on the dashboard's new-session prompt and session UX based on live testing:
+
+- **Nav while streaming** (c3097b6): dropped the `!streaming` gate so Left/Up/Down work
+  while the focused session is mid-response (it keeps running in the background).
+- **Input inside the panel** (025592e): moved the new-session prompt inside the Agents
+  panel instead of a detached box; removed the duplicate session input rendered behind the
+  overlay (aada986 — skip `render_bottom_panel` when the dashboard is open).
+- **Real input box** (2be9ca7): replaced a hand-rolled single-line field with maki's actual
+  `input_box.view` so the prompt gets `/` command palette, Ctrl-S file picker, paste/drag
+  images, proper cursor, and — critically — images are no longer dropped: `SpawnSession` now
+  carries `Option<Box<Submission>>` (text + images) into `handle_submit`.
+- **Paste/drop routing** (faff98d): pasted text and dropped file/image paths now reach the
+  new-session input box instead of being swallowed by the picker's filter.
+- **Multi-row wrap** (2ef4348): the prompt wraps and grows to multiple rows because its
+  height is sized from the picker popup's inner width (65% - 2), not the full terminal width.
+  Shift+Enter / Ctrl+J insert a newline (via `is_newline_key`).
+- **Up/Down cycle + Ctrl-D delete** (a88e33a): in-session Up/Down cycle prev/next live
+  session; dashboard delete moved off Ctrl-X (global `/tasks`) to Ctrl-D.
+
+### `/rename` (08e3551, after reverting the dashboard `r` approach in 760745a)
+Renaming lives on the **session**, like Claude Code — not the dashboard. `/rename <title>`
+is a builtin command (`components/command.rs` BUILTIN_COMMANDS, `max_args = MAX`) handled by
+`app/session.rs::rename_current_session` (sets `state.session.title`, syncs, `enqueue_save`
+unconditionally). Shows in the `/` palette as "Rename the current session".
+
+### Persistence bug fix (da16e9a) — system-critical
+`SessionLog::append` (`maki-storage/src/sessions.rs`) early-returned when `buf.is_empty()`
+(no new messages), so a **title-only** change like `/rename` on an idle session was never
+written — the dashboard/list kept showing the old title. Fix: `SessionLog` tracks
+`saved_title`; `append` writes a fresh Meta record when the title changed even with no new
+messages. Regression test: `append_persists_title_only_change_without_new_messages`.
+
+### Install note
+Shipped by replacing the Homebrew binary at `/opt/homebrew/bin/maki` (v0.3.27). Copied
+binaries must be re-signed (`codesign --force --sign -`) or macOS SIGKILLs them on Apple
+Silicon. A `brew upgrade` would overwrite it — reinstall from this branch.
