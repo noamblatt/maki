@@ -248,11 +248,13 @@ impl App {
 
         if self.session_dashboard.is_open() {
             self.session_dashboard.tick();
+            // The picker centers a modal at 65% width with a 1-col border each
+            // side; size the input box to that inner width so it wraps at the
+            // right place and grows to multiple rows.
+            let popup_width = full.width.saturating_mul(65) / 100;
+            let input_inner_width = popup_width.saturating_sub(2).max(1);
             let max_input = (full.height / 2).max(3);
-            let input_height = self
-                .input_box
-                .height(full.width.saturating_sub(2))
-                .clamp(3, max_input);
+            let input_height = self.input_box.height(input_inner_width).clamp(3, max_input);
             let dash = self.session_dashboard.view(frame, full, input_height);
             overlay_rect = dash.popup;
 
