@@ -301,3 +301,27 @@ This keeps Step 3 small and consistent with maki's patterns instead of reinventi
 Rust toolchain now installed (rustup, stable 1.97.0 aarch64). Build/test/clippy all run
 locally. Steps 1-2 are compiler-verified: `cargo build` (workspace) OK, `cargo test -p
 maki-storage` 47 passed, `cargo clippy --all --tests` clean.
+
+---
+
+## G. Step 4 done — dashboard wired into the App
+
+- `App.session_dashboard: SessionDashboard` field + init; added to `overlays()` /
+  `overlays_mut()` (14 -> 15) and both `try_picker!` scroll/paste routes.
+- `maki agents` opens directly on the dashboard: `event_loop` calls `app.open_dashboard()`
+  when the `dashboard` flag is set. Plain `maki` unaffected.
+- Key routing: `App::handle_key` dispatches to the dashboard first when open. Right/Enter =>
+  `load_session`; Ctrl-X => delete (with "press again to confirm"); Esc/Close closes.
+  `delete_session` now also removes the row from the dashboard.
+- Session-view arrow rule (Claude Code parity): when on the main chat, input box empty, and
+  not streaming, `Left` opens the dashboard. Non-empty input keeps normal cursor movement.
+
+Verified: `cargo build` (workspace) OK, `cargo clippy --all --tests` clean,
+`cargo test -p maki-ui` 1002 passed, `maki agents` boots the TUI without panic.
+
+### Still TODO
+- Up/Down in an empty session to cycle prev/next session directly (needs the ordered session
+  list on the App; Left->dashboard is the primary back gesture and is done).
+- Step 5: write status transitions on AgentEvents (Working/NeedsInput/Completed) so the
+  sections populate live. Currently all sessions render as Completed/Idle until Tier-2 wiring.
+- Steps 6-9: Tier-2 supervisor (real background concurrency), spawn box, focus switching.

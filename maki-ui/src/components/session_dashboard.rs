@@ -140,6 +140,10 @@ impl SessionDashboard {
         self.picker.scroll(delta);
     }
 
+    pub fn handle_paste(&mut self, text: &str) -> bool {
+        self.picker.handle_paste(text)
+    }
+
     pub fn handle_key(&mut self, key: KeyEvent) -> DashboardAction {
         if is_delete_key(&key) {
             return self.handle_delete_key();
@@ -185,6 +189,16 @@ impl SessionDashboard {
 
     pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
         self.picker.view(frame, area)
+    }
+}
+
+impl crate::components::Overlay for SessionDashboard {
+    fn is_open(&self) -> bool {
+        self.is_open()
+    }
+
+    fn close(&mut self) {
+        self.close()
     }
 }
 

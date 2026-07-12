@@ -227,6 +227,11 @@ impl App {
         vec![]
     }
 
+    pub(crate) fn open_dashboard(&mut self) {
+        self.session_dashboard
+            .open(&self.state.session.cwd, &self.storage);
+    }
+
     pub(crate) fn apply_loaded_session(
         &mut self,
         session: AppSession,
@@ -266,6 +271,7 @@ impl App {
             return vec![];
         }
         self.session_picker.remove_entry(&session_id);
+        self.session_dashboard.remove_entry(&session_id);
         self.status_bar.flash("Session deleted".into());
         vec![]
     }

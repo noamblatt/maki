@@ -232,6 +232,9 @@ impl<'t> EventLoop<'t> {
         app.exit_on_done = exit_on_done;
         app.lua_event_handle = lua_event_handle;
         app.dashboard = dashboard;
+        if dashboard {
+            app.open_dashboard();
+        }
 
         if needs_login {
             app.login_picker.open(app.storage.clone());

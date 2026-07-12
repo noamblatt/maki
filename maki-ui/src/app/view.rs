@@ -239,6 +239,14 @@ impl App {
             overlay_rect = self.file_picker.view(frame, full);
         }
 
+        if self.session_dashboard.is_open() {
+            self.session_dashboard.tick();
+            overlay_rect = self.session_dashboard.view(frame, full);
+            if let Some(flash) = self.session_dashboard.take_flash() {
+                self.status_bar.flash(flash);
+            }
+        }
+
         if self.session_picker.is_open() {
             self.session_picker.tick();
             overlay_rect = self.session_picker.view(frame, full);

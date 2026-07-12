@@ -40,6 +40,7 @@ use crate::components::plan_form::{PlanForm, PlanFormAction};
 use crate::components::rewind_picker::{RewindPicker, RewindPickerAction};
 use crate::components::scrollbar;
 use crate::components::search_modal::{SearchAction, SearchModal};
+use crate::components::session_dashboard::{DashboardAction, SessionDashboard};
 use crate::components::session_picker::{SessionPicker, SessionPickerAction};
 use crate::components::status_bar::StatusBar;
 use crate::components::theme_picker::{ThemePicker, ThemePickerAction};
@@ -141,6 +142,7 @@ pub struct App {
     pub(super) login_picker: LoginPicker,
     pub(super) mcp_picker: McpPicker,
     pub(super) session_picker: SessionPicker,
+    pub(super) session_dashboard: SessionDashboard,
     pub(super) rewind_picker: RewindPicker,
     pub(super) help_modal: HelpModal,
     pub(super) usage_modal: UsageModal,
@@ -224,6 +226,7 @@ impl App {
             login_picker: LoginPicker::new(),
             mcp_picker: McpPicker::new(mcp_reader, mcp_config_errors),
             session_picker: SessionPicker::new(),
+            session_dashboard: SessionDashboard::new(),
             rewind_picker: RewindPicker::new(),
             help_modal: HelpModal::new(),
             usage_modal: UsageModal::new(),
@@ -399,6 +402,7 @@ impl App {
             };
         }
         try_picker!(self.session_picker);
+        try_picker!(self.session_dashboard);
         try_picker!(self.rewind_picker);
         try_picker!(self.task_picker);
         try_picker!(self.model_picker);
@@ -608,6 +612,25 @@ impl App {
             });
         }
 
+        if self.session_dashboard.is_open() {
+            return Some(match self.session_dashboard.handle_key(key) {
+                DashboardAction::Consumed => vec![],
+                DashboardAction::None => vec![],
+                DashboardAction::Open(id) => {
+                    self.session_dashboard.close();
+                    self.load_session(id)
+                }
+                DashboardAction::ConfirmDelete => {
+                    self.status_bar.flash(format!(
+                        "Press {} again to confirm delete",
+                        key::TASKS.label
+                    ));
+                    vec![]
+                }
+                DashboardAction::Delete(id) => self.delete_session(id),
+            });
+        }
+
         if self.session_picker.is_open() {
             return Some(match self.session_picker.handle_key(key) {
                 SessionPickerAction::Consumed => vec![],
@@ -782,6 +805,20 @@ impl App {
         }
 
         let streaming = self.status == Status::Streaming;
+
+        // Arrow keys navigate between sessions only when the input box is empty;
+        // otherwise they move the text cursor as usual. Left returns to the
+        // agents dashboard (Claude Code parity).
+        if self.is_main_chat()
+            && self.input_box.is_empty()
+            && !streaming
+            && key.modifiers.is_empty()
+            && key.code == KeyCode::Left
+        {
+            self.open_dashboard();
+            return vec![];
+        }
+
         match self.input_box.handle_key(key) {
             InputAction::Submit(sub) => self.handle_submit(sub),
             InputAction::PaletteSync(val) => {
@@ -1396,7 +1433,7 @@ impl App {
         vec![]
     }
 
-    fn overlays(&self) -> [&dyn Overlay; 14] {
+    fn overlays(&self) -> [&dyn Overlay; 15] {
         [
             &self.help_modal,
             &self.usage_modal,
@@ -1406,6 +1443,7 @@ impl App {
             &self.file_picker,
             &self.task_picker,
             &self.session_picker,
+            &self.session_dashboard,
             &self.rewind_picker,
             &self.theme_picker,
             &self.model_picker,
@@ -1415,7 +1453,7 @@ impl App {
         ]
     }
 
-    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 14] {
+    fn overlays_mut(&mut self) -> [&mut dyn Overlay; 15] {
         [
             &mut self.help_modal,
             &mut self.usage_modal,
@@ -1425,6 +1463,7 @@ impl App {
             &mut self.file_picker,
             &mut self.task_picker,
             &mut self.session_picker,
+            &mut self.session_dashboard,
             &mut self.rewind_picker,
             &mut self.theme_picker,
             &mut self.model_picker,
@@ -1501,6 +1540,7 @@ impl App {
         try_picker!(self.file_picker);
         try_picker!(self.task_picker);
         try_picker!(self.session_picker);
+        try_picker!(self.session_dashboard);
         try_picker!(self.rewind_picker);
         try_picker!(self.theme_picker);
         try_picker!(self.model_picker);
