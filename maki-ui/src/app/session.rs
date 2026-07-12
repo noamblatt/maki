@@ -254,7 +254,14 @@ impl App {
         const MAX_TITLE_LEN: usize = 100;
         let title: String = title.chars().take(MAX_TITLE_LEN).collect();
         self.state.session.title = title.clone();
-        self.save_session();
+        // Persist unconditionally: a rename must stick even for an otherwise
+        // empty session (save_session would skip it as "no content").
+        self.state.sync_session(
+            &self.shared_history,
+            &self.shared_tool_outputs,
+            &self.permissions,
+        );
+        self.enqueue_save();
         self.flash(format!("Renamed to \"{title}\""));
         vec![]
     }

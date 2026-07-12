@@ -285,6 +285,7 @@ pub struct SessionLog {
     saved_msg_count: usize,
     saved_tool_ids: HashSet<String>,
     saved_sub_msg_counts: HashMap<String, usize>,
+    saved_title: String,
 }
 
 fn sub_msg_snapshot<M>(map: &HashMap<String, Vec<M>>) -> HashMap<String, usize> {
@@ -404,7 +405,10 @@ impl SessionLog {
             }
         }
 
-        if buf.is_empty() {
+        // A title-only change (e.g. `/rename`) produces no new messages, but
+        // must still be persisted so the last meta record reflects it.
+        let title_changed = session.title != self.saved_title;
+        if buf.is_empty() && !title_changed {
             return Ok(());
         }
 
@@ -426,6 +430,7 @@ impl SessionLog {
         for (sub_id, count) in new_sub_counts {
             self.saved_sub_msg_counts.insert(sub_id, count);
         }
+        self.saved_title = session.title.clone();
 
         Ok(())
     }
@@ -474,6 +479,7 @@ impl SessionLog {
             saved_msg_count: session.messages.len(),
             saved_tool_ids: session.tool_outputs.keys().cloned().collect(),
             saved_sub_msg_counts: sub_msg_snapshot(&session.subagent_messages),
+            saved_title: session.title.clone(),
         }
     }
 }
@@ -1573,6 +1579,23 @@ mod tests {
         let list = TestSession::list_in("/project", dir).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].title, "v2");
+    }
+
+    #[test]
+    fn append_persists_title_only_change_without_new_messages() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+        let mut session: TestSession = Session::new("m", "/project");
+        session.messages.push(user_message("first"));
+        let mut log = SessionLog::create(dir, &session).unwrap();
+
+        // Rename with no new messages (the /rename case).
+        session.title = "renamed".into();
+        log.append(&session).unwrap();
+
+        let list = TestSession::list_in("/project", dir).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].title, "renamed");
     }
 
     #[test]
