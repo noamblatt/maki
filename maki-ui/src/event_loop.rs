@@ -543,6 +543,18 @@ impl<'t> EventLoop<'t> {
         }
     }
 
+    /// Move focus to the previous (-1) or next (+1) live session runtime,
+    /// wrapping around. No-op when only one session is running.
+    fn cycle_focus(&mut self, delta: i32) {
+        let n = self.sessions.len();
+        if n <= 1 {
+            return;
+        }
+        let cur = self.focused as i32;
+        let next = (cur + delta).rem_euclid(n as i32) as usize;
+        self.focused = next;
+    }
+
     /// Focus an existing runtime by session id, or attach the stored session as
     /// a new background runtime and focus it. Does not disturb other sessions.
     fn focus_session(&mut self, id: String) {
@@ -723,6 +735,8 @@ impl<'t> EventLoop<'t> {
             }
             Action::FocusSession(id) => self.focus_session(id),
             Action::SpawnSession(prompt) => self.spawn_session(prompt),
+            Action::FocusPrevSession => self.cycle_focus(-1),
+            Action::FocusNextSession => self.cycle_focus(1),
             Action::ShowDashboard => {
                 self.sessions[idx].app.open_dashboard();
             }

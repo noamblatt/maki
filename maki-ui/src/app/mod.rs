@@ -624,10 +624,14 @@ impl App {
                     self.session_dashboard.close();
                     vec![Action::SpawnSession(None)]
                 }
+                DashboardAction::SpawnTask(task) => {
+                    self.session_dashboard.close();
+                    vec![Action::SpawnSession(Some(task))]
+                }
                 DashboardAction::ConfirmDelete => {
                     self.status_bar.flash(format!(
                         "Press {} again to confirm delete",
-                        key::TASKS.label
+                        key::DELETE.label
                     ));
                     vec![]
                 }
@@ -812,15 +816,22 @@ impl App {
 
         // Arrow keys navigate between sessions only when the input box is empty;
         // otherwise they move the text cursor as usual. Left returns to the
-        // agents dashboard (Claude Code parity).
+        // agents dashboard; Up/Down cycle to the previous/next session
+        // (Claude Code parity).
         if self.is_main_chat()
             && self.input_box.is_empty()
             && !streaming
             && key.modifiers.is_empty()
-            && key.code == KeyCode::Left
         {
-            self.open_dashboard();
-            return vec![];
+            match key.code {
+                KeyCode::Left => {
+                    self.open_dashboard();
+                    return vec![];
+                }
+                KeyCode::Up => return vec![Action::FocusPrevSession],
+                KeyCode::Down => return vec![Action::FocusNextSession],
+                _ => {}
+            }
         }
 
         match self.input_box.handle_key(key) {

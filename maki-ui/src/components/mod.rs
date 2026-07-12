@@ -231,6 +231,10 @@ pub enum Action {
     SpawnSession(Option<String>),
     /// Return focus to the agents dashboard (no session rendered on top).
     ShowDashboard,
+    /// Move focus to the previous / next background session in the dashboard's
+    /// ordering. Used by Up/Down inside a session when the input box is empty.
+    FocusPrevSession,
+    FocusNextSession,
     ChangeModel(String),
     RefreshProvider {
         slug: String,

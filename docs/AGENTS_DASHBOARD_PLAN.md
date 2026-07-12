@@ -357,3 +357,21 @@ concurrently, unlimited.
 - Spawn box currently spawns an empty session (Ctrl-N) then you type; a dedicated inline
   "Describe a task" prompt on the board could pass the initial task in one step
   (SpawnSession already accepts Some(prompt)).
+
+---
+
+## I. Follow-ups delivered (post-Tier2 polish)
+
+- Delete key moved Ctrl-X -> Ctrl-D (matches session_picker; frees the global /tasks binding).
+- In-session Up/Down (empty input, not streaming) cycle to prev/next live session via new
+  Actions FocusPrevSession/FocusNextSession -> EventLoop::cycle_focus(delta) (wrap-around).
+- Inline "Describe a task for a new session" box on the dashboard: SessionDashboard owns a
+  TextBuffer; typing fills it, Enter with text -> DashboardAction::SpawnTask -> SpawnSession(
+  Some(task)); Enter empty opens the selected session. List nav (Up/Down/Right/Ctrl-N/Ctrl-D/
+  Esc) always drives the picker. Box rendered as a bordered strip under the picker popup.
+
+Nav model on the dashboard now: type = task box; Up/Down = navigate list; Right/Enter(empty)
+= open; Enter(with text) = spawn task; Ctrl-N = spawn empty; Ctrl-D = delete; Esc = back.
+
+Verified: workspace build + clippy clean, maki-ui 1005 + maki-storage 87 tests pass, both
+`maki` and `maki agents` boot.
