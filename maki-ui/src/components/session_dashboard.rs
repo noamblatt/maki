@@ -4,15 +4,13 @@ use crate::AppSession;
 use crate::components::format_relative_time;
 use crate::components::keybindings::key;
 use crate::components::list_picker::{ListPicker, PickerAction, PickerItem};
-use crate::text_buffer::TextBuffer;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use maki_storage::StateDir;
 use maki_storage::sessions::SessionStatus;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::text::Span;
 
 const TITLE: &str = " Agents ";
 const NO_SESSIONS_MSG: &str = "No sessions yet in this directory";
@@ -32,17 +30,17 @@ const SECTION_COMPLETED: &str = "Completed";
 const REFRESH_INTERVAL_TICKS: u16 = 60;
 
 const TASK_BOX_TITLE: &str = " New session ";
-const TASK_BOX_PLACEHOLDER: &str = "Describe a task for a new session";
 
 #[derive(Debug)]
 pub enum DashboardAction {
     Consumed,
     Open(String),
     NewSession,
-    /// Spawn a new session seeded with the typed task prompt.
-    SpawnTask(String),
     ConfirmDelete,
     Delete(String),
+    /// Not a dashboard navigation key: the caller should route it to the
+    /// shared input box (typing the new-session task, file picker, etc.).
+    Passthrough(KeyEvent),
     None,
 }
 
@@ -73,7 +71,6 @@ impl PickerItem for DashboardEntry {
 /// directory's sessions grouped into Needs input / Working / Completed sections.
 pub struct SessionDashboard {
     picker: ListPicker<DashboardEntry>,
-    task_input: TextBuffer,
     confirming: Option<(String, u64)>,
     pending_rx: Option<flume::Receiver<Result<Vec<DashboardEntry>, String>>>,
     flash: Option<String>,
@@ -86,7 +83,6 @@ impl SessionDashboard {
     pub fn new() -> Self {
         Self {
             picker: ListPicker::new().with_footer(FOOTER_HINTS),
-            task_input: TextBuffer::new(String::new()),
             confirming: None,
             pending_rx: None,
             flash: None,
@@ -162,7 +158,6 @@ impl SessionDashboard {
         self.pending_rx = None;
         self.source = None;
         self.refreshing = false;
-        self.task_input.clear();
     }
 
     pub fn remove_entry(&mut self, id: &str) {
@@ -194,41 +189,28 @@ impl SessionDashboard {
             return DashboardAction::NewSession;
         }
 
-        // List navigation keys always drive the picker, so the task box never
-        // swallows them. Everything else is treated as editing the task prompt.
+        // Navigation keys drive the session list. Everything else (typing the
+        // task, `/` commands, file picker, paste) is passed through to the
+        // shared input box owned by the App.
         match key.code {
-            KeyCode::Up | KeyCode::Down => {
+            KeyCode::Up | KeyCode::Down if key.modifiers.is_empty() => {
                 self.picker.handle_key(key);
-                return DashboardAction::Consumed;
+                DashboardAction::Consumed
             }
-            KeyCode::Right => {
-                return match self.picker.selected_item() {
-                    Some(item) => DashboardAction::Open(item.id.clone()),
-                    None => DashboardAction::Consumed,
-                };
-            }
-            KeyCode::Enter => {
-                let task = self.task_input.value();
-                if !task.trim().is_empty() {
-                    self.task_input.clear();
-                    return DashboardAction::SpawnTask(task);
-                }
-                return match self.picker.selected_item() {
-                    Some(item) => DashboardAction::Open(item.id.clone()),
-                    None => DashboardAction::Consumed,
-                };
-            }
-            KeyCode::Esc => {
-                return match self.picker.handle_key(key) {
-                    PickerAction::Close => DashboardAction::None,
-                    _ => DashboardAction::Consumed,
-                };
-            }
-            _ => {}
+            KeyCode::Right if key.modifiers.is_empty() => match self.picker.selected_item() {
+                Some(item) => DashboardAction::Open(item.id.clone()),
+                None => DashboardAction::Consumed,
+            },
+            KeyCode::Esc => match self.picker.handle_key(key) {
+                PickerAction::Close => DashboardAction::None,
+                _ => DashboardAction::Consumed,
+            },
+            _ => DashboardAction::Passthrough(key),
         }
+    }
 
-        self.task_input.handle_key(key);
-        DashboardAction::Consumed
+    pub fn selected_id(&self) -> Option<String> {
+        self.picker.selected_item().map(|item| item.id.clone())
     }
 
     fn handle_delete_key(&mut self) -> DashboardAction {
@@ -259,68 +241,56 @@ impl SessionDashboard {
         }
     }
 
-    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> Rect {
-        const TASK_BOX_HEIGHT: u16 = 2;
+    /// Renders the session list and the titled "New session" separator, and
+    /// returns the `Rect` where the caller should render the shared input box
+    /// (so it lives inside the same panel column, right under the list).
+    pub fn view(&mut self, frame: &mut Frame, area: Rect) -> DashboardLayout {
+        use ratatui::widgets::{Block, BorderType, Borders};
 
-        // Reserve a strip at the bottom for the "new task" prompt, letting the
-        // picker modal center itself in the remaining space above it.
-        let [list_area, task_area] = Layout::vertical([
+        const INPUT_ROWS: u16 = 3;
+        const SEPARATOR_ROW: u16 = 1;
+
+        // Reserve rows at the bottom for the "New session" separator + input,
+        // letting the picker modal center itself in the space above.
+        let [list_area, bottom] = Layout::vertical([
             Constraint::Min(1),
-            Constraint::Length(TASK_BOX_HEIGHT),
+            Constraint::Length(SEPARATOR_ROW + INPUT_ROWS),
         ])
         .areas(area);
 
         let popup = self.picker.view(frame, list_area);
 
-        // Align the task box under the picker popup for a coherent column.
-        let box_area = Rect {
-            x: popup.x,
-            y: task_area.y,
-            width: popup.width.max(1),
-            height: TASK_BOX_HEIGHT.min(task_area.height),
-        };
-        self.render_task_box(frame, box_area);
-
-        popup
-    }
-
-    fn render_task_box(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::widgets::{Block, BorderType, Borders};
-
+        // A single titled rule under the list, aligned to the popup column.
         let theme = crate::theme::current();
-        // A single titled top rule separates the input from the list above;
-        // no side or bottom borders, so it reads as a clean input line rather
-        // than a boxed panel (avoids the stacked double-line a full box gave).
+        let sep_area = Rect {
+            x: popup.x,
+            y: bottom.y,
+            width: popup.width.max(1),
+            height: SEPARATOR_ROW,
+        };
         let block = Block::default()
             .borders(Borders::TOP)
             .border_type(BorderType::Plain)
             .border_style(theme.input_border)
             .title(Span::styled(TASK_BOX_TITLE, theme.panel_title));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        frame.render_widget(block, sep_area);
 
-        let text = self.task_input.value();
-        let line = if text.is_empty() {
-            Line::from(vec![
-                super::chevron_span(),
-                Span::styled(TASK_BOX_PLACEHOLDER, theme.item_desc),
-            ])
-        } else {
-            let cursor_x = self.task_input.x();
-            let chars: Vec<char> = text.chars().collect();
-            let before: String = chars[..cursor_x.min(chars.len())].iter().collect();
-            let cursor_char = chars.get(cursor_x).copied().unwrap_or(' ');
-            let after_start = cursor_x.saturating_add(1).min(chars.len());
-            let after: String = chars[after_start..].iter().collect();
-            Line::from(vec![
-                super::chevron_span(),
-                Span::raw(before),
-                Span::styled(cursor_char.to_string(), theme.cursor),
-                Span::raw(after),
-            ])
+        let input_area = Rect {
+            x: popup.x,
+            y: bottom.y + SEPARATOR_ROW,
+            width: popup.width.max(1),
+            height: INPUT_ROWS.min(bottom.height.saturating_sub(SEPARATOR_ROW)),
         };
-        frame.render_widget(Paragraph::new(vec![line]), inner);
+
+        DashboardLayout { popup, input_area }
     }
+}
+
+/// Where the dashboard drew itself: `popup` is the modal rect (for overlay
+/// bookkeeping), `input_area` is where the caller renders the shared input box.
+pub struct DashboardLayout {
+    pub popup: Rect,
+    pub input_area: Rect,
 }
 
 impl crate::components::Overlay for SessionDashboard {
@@ -412,27 +382,34 @@ mod tests {
     }
 
     #[test]
-    fn typing_fills_task_box_and_enter_spawns() {
+    fn typing_and_enter_pass_through_to_shared_input() {
         let mut dash = SessionDashboard::new();
-        for c in "fix bug".chars() {
-            assert!(matches!(press(&mut dash, KeyCode::Char(c)), DashboardAction::Consumed));
-        }
-        assert_eq!(dash.task_input.value(), "fix bug");
-
-        match press(&mut dash, KeyCode::Enter) {
-            DashboardAction::SpawnTask(task) => assert_eq!(task, "fix bug"),
-            other => panic!("expected SpawnTask, got {other:?}"),
-        }
-        // Task box is cleared after spawning.
-        assert_eq!(dash.task_input.value(), "");
+        // Printable keys and Enter are not dashboard-navigation, so they are
+        // passed through to the App's shared input box.
+        assert!(matches!(
+            press(&mut dash, KeyCode::Char('x')),
+            DashboardAction::Passthrough(_)
+        ));
+        assert!(matches!(
+            press(&mut dash, KeyCode::Enter),
+            DashboardAction::Passthrough(_)
+        ));
     }
 
     #[test]
-    fn enter_with_empty_task_does_not_spawn() {
+    fn navigation_keys_stay_in_dashboard() {
         let mut dash = SessionDashboard::new();
-        // No sessions loaded and no task typed: Enter is a no-op open attempt.
         assert!(matches!(
-            press(&mut dash, KeyCode::Enter),
+            press(&mut dash, KeyCode::Up),
+            DashboardAction::Consumed
+        ));
+        assert!(matches!(
+            press(&mut dash, KeyCode::Down),
+            DashboardAction::Consumed
+        ));
+        // Right with no selection is consumed (nothing to open).
+        assert!(matches!(
+            press(&mut dash, KeyCode::Right),
             DashboardAction::Consumed
         ));
     }

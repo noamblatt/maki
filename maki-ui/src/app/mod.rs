@@ -52,7 +52,7 @@ use crate::components::{
 use crate::image;
 use crate::selection::{SelectionState, ZoneRegistry};
 use arc_swap::{ArcSwap, ArcSwapOption};
-use crossterm::event::{KeyCode, KeyEvent, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use maki_agent::permissions::PermissionManager;
 use maki_agent::{
     AgentEvent, Envelope, ImageSource, McpConfigErrors, McpPromptInfo, McpSnapshotReader,
@@ -613,20 +613,22 @@ impl App {
         }
 
         if self.session_dashboard.is_open() {
-            return Some(match self.session_dashboard.handle_key(key) {
+            let action = self.session_dashboard.handle_key(key);
+            return Some(match action {
                 DashboardAction::Consumed => vec![],
-                DashboardAction::None => vec![],
+                DashboardAction::None => {
+                    // Esc closed the dashboard; nothing else to do.
+                    vec![]
+                }
                 DashboardAction::Open(id) => {
                     self.session_dashboard.close();
+                    self.input_box.discard();
                     vec![Action::FocusSession(id)]
                 }
                 DashboardAction::NewSession => {
                     self.session_dashboard.close();
+                    self.input_box.discard();
                     vec![Action::SpawnSession(None)]
-                }
-                DashboardAction::SpawnTask(task) => {
-                    self.session_dashboard.close();
-                    vec![Action::SpawnSession(Some(task))]
                 }
                 DashboardAction::ConfirmDelete => {
                     self.status_bar.flash(format!(
@@ -636,6 +638,7 @@ impl App {
                     vec![]
                 }
                 DashboardAction::Delete(id) => self.delete_session(id),
+                DashboardAction::Passthrough(key) => self.dashboard_input_key(key),
             });
         }
 
@@ -928,6 +931,58 @@ impl App {
         } else {
             self.run_id += 1;
             self.start_from_queue(&msg)
+        }
+    }
+
+    /// Handle a key routed from the dashboard to the shared input box. Mirrors
+    /// the normal input flow (command palette, file picker, image paste), but a
+    /// submit spawns a new session seeded with the text instead of sending to
+    /// the current session. Enter on an empty box opens the selected session.
+    fn dashboard_input_key(&mut self, key: KeyEvent) -> Vec<Action> {
+        if key::FILE_PICKER.matches(key) {
+            self.file_picker.open(&self.state.session.cwd);
+            return vec![];
+        }
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.image_paste_rx.is_empty()
+        {
+            self.start_image_paste();
+            return vec![];
+        }
+
+        match self
+            .command_palette
+            .handle_key(key, &self.input_box.buffer.value())
+        {
+            CommandAction::Consumed => return vec![],
+            CommandAction::Execute(cmd) => return self.execute_command(cmd),
+            CommandAction::Complete(text) => {
+                self.command_palette.sync(&text);
+                self.input_box.set_input(text);
+                self.input_box.buffer.move_to_end();
+                return vec![];
+            }
+            CommandAction::Passthrough => {}
+        }
+
+        match self.input_box.handle_key(key) {
+            InputAction::Submit(sub) => {
+                if sub.is_empty() {
+                    if let Some(id) = self.session_dashboard.selected_id() {
+                        self.session_dashboard.close();
+                        return vec![Action::FocusSession(id)];
+                    }
+                    return vec![];
+                }
+                self.session_dashboard.close();
+                vec![Action::SpawnSession(Some(sub.text))]
+            }
+            InputAction::PaletteSync(val) => {
+                self.command_palette.sync(&val);
+                vec![]
+            }
+            _ => vec![],
         }
     }
 

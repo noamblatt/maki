@@ -241,7 +241,20 @@ impl App {
 
         if self.session_dashboard.is_open() {
             self.session_dashboard.tick();
-            overlay_rect = self.session_dashboard.view(frame, full);
+            let layout = self.session_dashboard.view(frame, full);
+            overlay_rect = layout.popup;
+            // Render the shared input box inside the Agents panel so the
+            // new-session prompt gets full editing, file picker, image paste,
+            // and `/` command suggestions.
+            self.input_box.view(
+                frame,
+                layout.input_area,
+                false,
+                self.separator_style(),
+                true,
+                None,
+            );
+            self.command_palette.view(frame, layout.input_area);
             if let Some(flash) = self.session_dashboard.take_flash() {
                 self.status_bar.flash(flash);
             }
