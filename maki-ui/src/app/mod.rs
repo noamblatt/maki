@@ -713,6 +713,9 @@ impl App {
     }
 
     fn dispatch_plugin_keymap(&self, key: KeyEvent) -> bool {
+        if is_arrow(key.code) && !self.input_box.is_empty() {
+            return false;
+        }
         let snap = self.keymap_reader.load();
         for entry in &snap.entries {
             if entry.key == key.code && entry.modifiers == key.modifiers {
@@ -1557,6 +1560,13 @@ impl App {
         actions.extend(self.start_from_queue(&msg));
         actions
     }
+}
+
+fn is_arrow(code: KeyCode) -> bool {
+    matches!(
+        code,
+        KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+    )
 }
 
 fn sync_search_highlight(modal: &SearchModal, chat: &mut Chat) {

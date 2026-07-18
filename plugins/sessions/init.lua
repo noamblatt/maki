@@ -568,6 +568,8 @@ maki.api.register_command({
   handler = open,
 })
 
+maki.keymap.set("n", "<Left>", open, { desc = "Browse and switch sessions" })
+
 maki.api.register_command({
   name = "/rename",
   description = "Rename the current session",
